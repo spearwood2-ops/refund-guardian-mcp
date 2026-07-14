@@ -16,14 +16,19 @@ def _norm(t):
     return re.sub(r"\s+", " ", t.strip())
 
 
-def _negated(text, m_start, patterns=(r"하지\s*않", r"않았", r"안\s*했", r"아(니|닌|님|냐|닐)", r"없")):
+# ★ 부정 어휘의 단일 정의 지점(SSOT). '아니-' 전 활용형은 음절 단위라 반드시 여기에만 추가한다.
+#   (아니/아닌/아님/아냐/아닐/아닙(니다)) — 아래 _negated/_NOUN_NEG/_NEG_WIDE 전부 이걸 참조.
+_NEG_CORE = r"아(니|닌|님|냐|닐|닙)"
+
+
+def _negated(text, m_start, patterns=(r"하지\s*않", r"않았", r"안\s*했", _NEG_CORE, r"없")):
     """매치 지점 뒤 12자 내 부정어가 있으면 그 신호를 무효화."""
     tail = text[m_start:m_start + 16]
     return any(re.search(p, tail) for p in patterns)
 
 
 # 명사(업종·채널) 부정: "학원은 아니고", "학원 수업은 아니고", "온라인 거래가 아닌데" — 동사 부정(하지 않)과 구분
-_NOUN_NEG = (r"^\s*[가-힣]{0,4}\s*(은|는|이|가)?\s*(아니|아닌|아님|아냐|말고)",)
+_NOUN_NEG = (r"^\s*[가-힣]{0,4}\s*(은|는|이|가)?\s*(" + _NEG_CORE + r"|말고)",)
 
 
 def _has(text, rx, neg_aware=False, neg_patterns=None):
@@ -230,8 +235,7 @@ _GROUND_PATTERNS = [
     ("적법한 청약철회", r"(청약\s*철회|철회)"),
 ]
 _NO_GROUND = re.compile(r"(단순\s*변심|그냥\s*(환불|취소|해지)|마음이\s*바뀌|정상\s*(제공|영업|운영)\s*중|문제.{0,4}없)")
-# 부정·불확실 어휘 통합(음절 활용형 포함) — 여러 정규식에 흩어지며 일부만 고쳐지는 사고 방지
-_NEG_CORE = r"아(니|닌|님|냐|닐)"  # 아니/아닌/아님/아냐/아닐 전 활용형
+# 불확실·희망 어휘 (부정 코어는 파일 상단 _NEG_CORE 단일 정의를 참조)
 _DESIRE = re.compile(r"(하고\s*싶|싶습니다|싶어요|하려|할래|할까|하면\s*좋|했으면|희망|원해|원합니다|바랍니다)")  # 희망형 = 사실 아님
 _UNCERTAIN = re.compile(r"(것\s*같|듯\s*하|듯한|모르겠|인지\s*모| 카더라|들었어|들은\s*것|의심|의문|추정|아닐까|가능성|가능한지|궁금|일지도|다고\s*(합니다|해요|함|하더|해서))")  # 불확실·전언·질문형 = 판정보류
 _NEG_WIDE = re.compile(r"(하지\s*않|않았|안\s*(했|됐|당했|한)|(는|이|가)?\s*" + _NEG_CORE + r"|같지\s*않|없)")

@@ -108,6 +108,20 @@ check("카드사 통지: '폐업 아님' → 초안 미생성", "[초안]" not i
 cid, _, _ = classify("전화권유로 가입하지 않았는데 앱 구독 해지하고 싶어요")
 check("분류: 비계약 전화권유+구독 → subscribe", cid == "subscribe", "→ %s" % cid)
 
+# 2-5) v2.4 재검증 지적: '아닙니다' 활용형 + 코어 3곳 배선 검증
+st, _, _ = installment_defense(900000, 6, True, "폐업 아닙니다")
+check("항변권: '폐업 아닙니다' → review", st == "review", "→ %s" % st)
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "폐업 아닙니다", amount_won=900000, installment_months=6, has_remaining_balance=True)
+check("카드사 통지: '폐업 아닙니다' → 초안 미생성", "[초안]" not in r)
+st, _, _ = installment_defense(900000, 6, True, "하자 아닙니다, 문의만요")
+check("항변권: '하자 아닙니다' → review", st == "review", "→ %s" % st)
+from refund_rules import _NEG_CORE, _NOUN_NEG, _negated, _NEG_WIDE  # noqa: E402
+import re as _re2
+check("배선: _NEG_WIDE가 코어 포함", _NEG_CORE in _NEG_WIDE.pattern)
+check("배선: _NOUN_NEG가 코어 포함", any(_NEG_CORE in p for p in _NOUN_NEG))
+check("배선: _negated 기본값이 코어 포함", _negated("X 아닙니다", 1))
+check("코어: 아닙(니다) 활용형 포함", bool(_re2.search(_NEG_CORE, "아닙니다")))
+
 # 3) 출력 길이(첫 응답 ≈500자, 여유 550) + 이모지 0
 import re as _re
 _EMOJI = _re.compile(r"[\U0001F000-\U0001FAFF☀-➿]")
