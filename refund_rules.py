@@ -10,6 +10,7 @@ checker 검증(2026-07-14) P0 반영:
 원칙: 사실이 부족하면 '가능/불가능' 대신 '추가 확인 필요'. 최종 확인은 1372.
 """
 import re
+from typing import List, Literal, Optional
 
 
 def _norm(t):
@@ -226,28 +227,301 @@ KNOWLEDGE = {
     },
 }
 
-# ---------- 할부항변권 (v2.1: 법정 사유 — 부정문·희망형 오판 차단) ----------
-_GROUND_PATTERNS = [
-    ("계약 무효·불성립", r"(무효|불성립|성립.{0,6}(안|않))"),
-    ("미공급·이행중단", r"(폐업|문\s*을?\s*닫|먹튀|잠적|연락\s*두절|영업\s*중단|공급.{0,6}(안|못)|이행.{0,6}(안|못|중단)|서비스.{0,8}(중단|못\s*받))"),
-    ("하자·불이행", r"(하자|불량|고장|약속.{0,8}(다르|어김|불이행)|계약.{0,8}(다르|위반))"),
-    ("계약 취소·해제·해지", r"(취소|해제|해지)"),
-    ("적법한 청약철회", r"(청약\s*철회|철회)"),
+# ---------- 할부항변권 (v2.6: 구조화 확정 사유만 positive gate 통과) ----------
+InstallmentGroundCode = Literal[
+    "contract_invalid",
+    "contract_ended",
+    "supply_not_completed",
+    "warranty_unfulfilled",
+    "purpose_failed_by_breach",
+    "lawful_withdrawal",
 ]
+InstallmentGroundFact = Literal[
+    "installment_contract_scope",
+    "contract_invalid_confirmed",
+    "contract_ended_confirmed",
+    "supply_time_reached",
+    "actual_non_supply",
+    "warranty_duty_exists",
+    "warranty_duty_unfulfilled",
+    "seller_breach_confirmed",
+    "contract_purpose_unattainable",
+    "withdrawal_legally_available",
+    "withdrawal_exercised",
+]
+
+GROUND_REQUIRED_FACTS = {
+    "contract_invalid": frozenset(("installment_contract_scope", "contract_invalid_confirmed")),
+    "contract_ended": frozenset(("installment_contract_scope", "contract_ended_confirmed")),
+    "supply_not_completed": frozenset(("installment_contract_scope", "supply_time_reached", "actual_non_supply")),
+    "warranty_unfulfilled": frozenset(("installment_contract_scope", "warranty_duty_exists", "warranty_duty_unfulfilled")),
+    "purpose_failed_by_breach": frozenset(("installment_contract_scope", "seller_breach_confirmed", "contract_purpose_unattainable")),
+    "lawful_withdrawal": frozenset(("installment_contract_scope", "withdrawal_legally_available", "withdrawal_exercised")),
+}
+
+# 할부거래법 제16조 제1항 1~6호와 일대일 대응한다. 자유문장은 이 코드의 후보를
+# 되물을 법정 사유 후보를 찾는 데만 쓴다. 이 입력만으로 권리를 확정하지 않는다.
+INSTALLMENT_GROUNDS = {
+    "contract_invalid": {
+        "label": "할부계약 불성립·무효",
+        "pattern": r"(무효|불성립|성립.{0,6}(안|않))",
+        "confirm": "할부계약이 실제로 성립하지 않았거나 무효로 확정됐나요?",
+    },
+    "contract_ended": {
+        "label": "할부계약 취소·해제·해지",
+        "pattern": r"(취소|해제|해지)",
+        "confirm": "계약의 취소·해제·해지가 접수 단계가 아니라 실제로 완료됐나요?",
+    },
+    "supply_not_completed": {
+        "label": "정해진 시기까지 재화·용역 전부 또는 일부 미공급",
+        "pattern": r"(폐업|문\s*을?\s*닫|먹튀|잠적|연락\s*두절|영업\s*중단|공급.{0,6}(안|못)|이행.{0,6}(안|못|중단)|서비스.{0,8}(중단|못\s*받))",
+        "confirm": "폐업·연락두절 사실 외에, 약정한 재화나 남은 서비스가 정해진 때까지 실제로 제공되지 않았나요?",
+    },
+    "warranty_unfulfilled": {
+        "label": "하자담보책임 미이행",
+        "pattern": r"(하자\s*담보.{0,10}(불이행|이행.{0,5}(안|않|못))|하자|불량|고장)",
+        "confirm": "하자 자체뿐 아니라 판매자가 수리·교환 등 하자담보책임을 실제로 이행하지 않았나요?",
+    },
+    "purpose_failed_by_breach": {
+        "label": "판매자 채무불이행으로 할부계약 목적 달성 불가",
+        "pattern": r"(채무\s*불이행|계약\s*목적.{0,10}(달성.{0,4}(못|불가)|불가능)|약속.{0,8}(다르|어김|불이행)|계약.{0,8}(다르|위반))",
+        "confirm": "판매자의 채무불이행 때문에 할부계약의 목적을 실제로 달성할 수 없게 됐나요?",
+    },
+    "lawful_withdrawal": {
+        "label": "다른 법률에 따라 정당하게 행사한 청약철회",
+        "pattern": r"(청약\s*철회|철회)",
+        "confirm": "다른 법률의 요건·기간을 지켜 청약철회 의사를 실제로 통지했나요?",
+    },
+}
+_GROUND_PATTERNS = [(code, spec["pattern"]) for code, spec in INSTALLMENT_GROUNDS.items()]
+
+# 행동문서를 열 수 있는 '완전한 법정 사유'의 보수적 화이트리스트.
+# 위 pattern은 되물음을 위한 후보 탐지이고, 아래 패턴도 공식 확인에 보낼 후보를 좁히는 용도다.
+_FULL_GROUND_PATTERNS = {
+    "contract_invalid": (
+        re.compile(
+            r"할부\s*계약(?:이|은|자체가)?\s*(?:"
+            r"성립하지\s*않았(?:습니다|어요)|성립\s*안\s*됐(?:습니다|어요)|"
+            r"불성립(?:으로|임이|이)?\s*(?:확인됐습니다|확인됐어요|확정됐습니다|확정됐어요|판정됐습니다|확인되었습니다|확정되었습니다|입니다)|"
+            r"무효(?:로|임이|라고)?\s*(?:확인됐습니다|확인됐어요|확정됐습니다|확정됐어요|판정됐습니다|결정됐습니다|확인되었습니다|확정되었습니다|입니다)"
+            r")"
+        ),
+    ),
+    "contract_ended": (
+        re.compile(
+            r"할부\s*계약(?:이|은|을|를|의)?\s*(?:이미\s*)?(?:적법하게\s*)?(?:취소|해제|해지)(?:가|를|을)?\s*(?:이미\s*)?(?:"
+            r"완료(?:됐습니다|됐어요|되었습니다|했습니다|했어요)|"
+            r"확정(?:됐습니다|됐어요|되었습니다)|"
+            r"됐습니다|됐어요|되었습니다|했습니다|했어요|하였습니다|한\s*상태입니다"
+            r")"
+        ),
+    ),
+    "supply_not_completed": (
+        re.compile(
+            r"(?:남은|약정한|계약한|제공받기로\s*한).{0,14}(?:서비스|용역|수업|강의|이용권).{0,24}(?:"
+            r"제공(?:이|을)?\s*(?:되지\s*않았습니다|받지\s*못했습니다)|"
+            r"공급(?:이|을)?\s*(?:되지\s*않았습니다|받지\s*못했습니다)|"
+            r"받지\s*못(?:했습니다|했어요|하고\s*있습니다)|"
+            r"못\s*받(?:았습니다|았어요|고\s*있습니다|아요|아(?=\s|$))|"
+            r"중단.{0,12}(?:이용하지\s*못|받지\s*못)|"
+            r"미공급(?:됐습니다|되었습니다|입니다)|미이행(?:됐습니다|되었습니다|입니다)"
+            r")"
+        ),
+    ),
+    "warranty_unfulfilled": (
+        re.compile(
+            r"(?:하자\s*담보\s*책임|보증\s*의무).{0,24}(?:"
+            r"이행하지\s*않았(?:습니다|어요)|이행\s*안\s*했(?:습니다|어요)|이행되지\s*않았습니다|미이행(?:됐습니다|되었습니다|입니다)|"
+            r"불이행(?:이\s*확인됐습니다|입니다)|거부(?:됐습니다|당했습니다|했습니다)"
+            r")"
+        ),
+        re.compile(
+            r"(?:제품|상품|물품).{0,18}(?:하자|불량|고장).{0,24}(?:판매자|업체|사업자).{0,20}(?:수리|교환|하자\s*처리|보증).{0,16}(?:"
+            r"거부했(?:습니다|어요)|안\s*해(?:줘요|줍니다)|해주지\s*않았(?:습니다|어요)|"
+            r"이행하지\s*않았(?:습니다|어요)|처리하지\s*않았(?:습니다|어요)|미이행(?:했습니다|상태입니다))"
+        ),
+        re.compile(
+            r"(?:판매자|업체|사업자).{0,18}(?:하자|불량|고장).{0,16}(?:수리|교환|하자\s*처리|보증).{0,16}(?:"
+            r"거부했(?:습니다|어요)|안\s*해(?:줘요|줍니다)|해주지\s*않았(?:습니다|어요))"
+        ),
+    ),
+    "purpose_failed_by_breach": (
+        re.compile(
+            r"(?<![가-힣])(?:판매자|할부거래업자|업체).{0,20}(?:채무\s*불이행|계약\s*위반|약속(?:과|이)\s*(?:다른|달라|어긋)|약정(?:과|이)\s*(?:다른|달라|어긋)).{0,42}"
+            r"(?:계약\s*)?목적.{0,18}(?:달성(?:할\s*수\s*없(?:습니다|어요)|하지\s*못했(?:습니다|어요)|이\s*불가합니다)|"
+            r"못\s*달성했(?:습니다|어요)|불가능(?:합니다|해졌어요))"
+        ),
+    ),
+}
+_LAWFUL_WITHDRAWAL_CONTEXT = re.compile(
+    r"(적법|정당(?:하게|한)|요건(?:을|이)?\s*충족|법정\s*기간|기간\s*(?:안|내))"
+)
+_WITHDRAWAL_EXERCISED = re.compile(
+    r"(?:청약\s*철회|철회\s*통지).{0,24}(?:"
+    r"행사(?:했습니다|했어요)|발송(?:했습니다|했어요)|보냈(?:습니다|어요)|"
+    r"도달(?:했습니다|했어요)|완료(?:됐습니다|되었습니다))"
+)
+_SUPPLY_TIME_REACHED = re.compile(
+    r"(?:(?:배송|공급|제공)\s*)?(?:예정일|기한|시기|약속한\s*(?:날|날짜)).{0,20}"
+    r"(?:지났|도과|넘었|경과)|(?:지났|도과|넘었|경과).{0,16}(?:예정일|기한|시기|약속한\s*(?:날|날짜))"
+)
+_GOODS_NOT_SUPPLIED = re.compile(
+    r"(?:재화|상품|제품|물품|배송).{0,28}(?:받지\s*못했(?:습니다|어요)|"
+    r"못\s*받았(?:습니다|어요)|배송되지\s*않았(?:습니다|어요)|"
+    r"미배송(?:입니다|됐습니다)|미공급(?:입니다|됐습니다))"
+)
+_COMMON_REFUTATION = re.compile(
+    r"(사실(?:이|은)?\s*(?:아니|아닙)|틀린\s*말|거짓|사실무근|오보|"
+    r"단정(?:하|하기).{0,6}어렵|볼\s*수(?:는|도)?\s*없)"
+)
+_ASSERTION_TAIL_VETO = re.compile(
+    r"^\s*(?:[?？]|맞(?:나요|습니까)|인가요|건가요|일까요|인지|"
+    r"[\"'”’]?\s*(?:라고|라는|라며)|(?:가|이)?\s*아니(?:라|고|며)|"
+    r"[,，.。;；]\s*.*(?:말(?:했|했다|합니다|씀)|안내(?:했|했다|받)|"
+    r"알려(?:줬|주었|졌)|들었|전해|이야기|얘기|소문|확인하지\s*못|"
+    r"(?:판결문|확인서|내역|계약서|발송증명).{0,16}(?:받지|보지)\s*못))"
+)
+_POST_ASSERTION_VETO = re.compile(
+    r"(전해\s*들|들었습니다|들었어요|말(?:했|했다|합니다|씀)|"
+    r"안내(?:했|했다|받)|알려(?:줬|주었|졌)|소문|아마|확실하지|확실한지|"
+    r"정확한지|사실인지|그런\s*것\s*같|것\s*같습니다|제\s*추측|추정|모르|"
+    r"여부.{0,10}(?:미확인|불확실)|판단.{0,8}맞(?:습니까|나요)|"
+    r"(?:다음|향후).{0,10}(?:상황|가정)|가정한\s*표현|상정|"
+    r"(?:예시\s*통지서|문구).{0,20}(?:넣어|작성|요청)|넣어\s*달)"
+)
+_GROUND_CONTRADICTIONS = {
+    "contract_invalid": (
+        re.compile(r"할부\s*계약.{0,24}(?:유효(?:합니다|하지만|하며|하고|함|한\s*상태)|정상적으로\s*성립)"),
+    ),
+    "contract_ended": (
+        re.compile(r"할부\s*계약.{0,28}(?:아직\s*)?(?:계속\s*)?(?:유지(?:\s*중|되고\s*있|됩니다)|유효(?:합니다|한\s*상태))"),
+        re.compile(r"(?:취소|해제|해지).{0,14}(?:접수만|신청만|예정|계획|의향|원함)"),
+        re.compile(r"할부\s*계약.{0,22}(?:종료|취소|해제|해지).{0,10}(?:되지\s*않|안\s*됐|아니)"),
+    ),
+    "supply_not_completed": (
+        re.compile(
+            r"정상\s*(?:제공|이행|운영|영업|이용)(?:하고\s*있|\s*중(?:입니다|이에요|이고|이며|인데|입니다만|$))"
+        ),
+        re.compile(r"승계.{0,24}정상\s*(?:제공|이행|운영|이용)"),
+        re.compile(r"(?:공급|배송|제공)?\s*(?:예정일|기한|시기).{0,18}(?:다음|아직|도래\s*전)|아직.{0,12}(?:기한|예정일|시기)\s*전"),
+        re.compile(r"(?:모두|전부).{0,14}(?:정상\s*이용|정상\s*제공|이용\s*완료|제공\s*완료)|(?:약정|계약).{0,12}(?:만료|완료)"),
+        re.compile(r"(?:무료\s*체험|체험\s*서비스)|(?:소비자|수강생|구매자).{0,14}(?:일시\s*정지|중단\s*요청|정지\s*요청)"),
+    ),
+    "warranty_unfulfilled": (
+        re.compile(r"(?:무상\s*)?(?:수리|교환|보증|하자\s*처리).{0,16}(?:진행\s*중|이행\s*중|완료됐|완료되었습니다)"),
+        re.compile(r"(?:보증|담보)\s*기간.{0,16}(?:끝|만료|지났|경과)|유상\s*수리"),
+        re.compile(r"(?:하자|불량|고장).{0,12}(?:없|아니)|(?:하자\s*담보\s*책임|보증\s*의무).{0,14}(?:없|아니)|보증.{0,12}대상.{0,8}아(?:니|닌|님)"),
+    ),
+    "purpose_failed_by_breach": (
+        re.compile(r"계약\s*목적.{0,16}(?:달성했습니다|달성됐습니다|달성\s*가능|달성할\s*수\s*있)"),
+        re.compile(r"정상\s*이용\s*중"),
+        re.compile(r"판매자.{0,12}(?:잘못|책임|귀책).{0,8}(?:없|아니)|소비자.{0,12}(?:책임|귀책)"),
+        re.compile(r"(?:제3자|배송\s*업체|배송업체|구매자|소비자).{0,16}(?:책임|귀책|계약\s*위반)"),
+    ),
+    "lawful_withdrawal": (
+        re.compile(r"(?:청약\s*)?철회.{0,16}(?:기간\s*(?:경과|도과)|불가|무효|적법하게\s*거절)"),
+        re.compile(r"기간.{0,12}(?:지났|경과했|도과했)"),
+        re.compile(r"(?:전자상거래법|방문판매법|다른\s*법률).{0,20}(?:적용\s*대상.{0,6}아(?:니|닌|님|냐|닐|닙)|적용되지\s*않|미적용)"),
+        re.compile(r"(?:주문\s*제작|맞춤\s*제작).{0,12}(?:예외|철회\s*제한)|요건.{0,12}충족하지\s*못|(?:적용|기간|요건).{0,12}(?:미확인|확인하지\s*않|알\s*수\s*없)"),
+    ),
+}
+
+
+def _has_direct_match(regexes, reason_text):
+    """확정형 문구 뒤에 물음표·전언·즉시 반전이 붙으면 사실 진술로 보지 않는다."""
+    for rx in regexes:
+        for match in rx.finditer(reason_text):
+            tail = reason_text[match.end():]
+            if not (_ASSERTION_TAIL_VETO.search(tail) or _POST_ASSERTION_VETO.search(tail)):
+                return True
+    return False
+
+
+def _matches_full_ground(reason_text, ground_code):
+    """법 제16조 제1항의 선택된 사유 전체가 확정 사실로 표현됐는지 확인한다."""
+    rt = _norm(reason_text or "")
+    if _COMMON_REFUTATION.search(rt):
+        return False
+    if ground_code == "supply_not_completed":
+        service_stopped = _has_direct_match(_FULL_GROUND_PATTERNS[ground_code], rt)
+        goods_overdue = bool(
+            _SUPPLY_TIME_REACHED.search(rt)
+            and _has_direct_match((_GOODS_NOT_SUPPLIED,), rt)
+        )
+        return service_stopped or goods_overdue
+    if ground_code == "lawful_withdrawal":
+        return bool(
+            _LAWFUL_WITHDRAWAL_CONTEXT.search(rt)
+            and _has_direct_match((_WITHDRAWAL_EXERCISED,), rt)
+        )
+    return _has_direct_match(_FULL_GROUND_PATTERNS.get(ground_code, ()), rt)
+
+
+def _contradicts_full_ground(reason_text, ground_code):
+    """확정 사유 뒤에 정상 이행·계약 유지·기간 경과 등 반대 사실이 있으면 차단한다."""
+    rt = _norm(reason_text or "")
+    if _COMMON_REFUTATION.search(rt):
+        return True
+    return any(rx.search(rt) for rx in _GROUND_CONTRADICTIONS.get(ground_code, ()))
+
+
 _NO_GROUND = re.compile(r"(단순\s*변심|그냥\s*(환불|취소|해지)|마음이\s*바뀌|정상\s*(제공|영업|운영)\s*중|문제.{0,4}없)")
 # 불확실·희망 어휘 (부정 코어는 파일 상단 _NEG_CORE 단일 정의를 참조)
-_DESIRE = re.compile(r"(하고\s*싶|싶습니다|싶어요|하려|할래|할까|하면\s*좋|했으면|희망|원해|원합니다|바랍니다)")  # 희망형 = 사실 아님
-_UNCERTAIN = re.compile(r"(것\s*같|듯\s*하|듯한|모르겠|인지\s*모| 카더라|들었어|들은\s*것|의심|의문|추정|아닐까|가능성|가능한지|궁금|일지도|다고\s*(합니다|해요|함|하더|해서))")  # 불확실·전언·질문형 = 판정보류
+_UNCERTAIN = re.compile(r"(아마|혹시|것\s*같|같(?:아요|습니다|다)|듯\s*하|듯한|모르|인지\s*모|카더라|의심|의문|추정|생각|아닐까|가능성|가능한지|궁금|일\s*수|일지도|여부)")
 _NEG_WIDE = re.compile(r"(하지\s*않|않았|안\s*(했|됐|당했|한)|(는|이|가)?\s*" + _NEG_CORE + r"|같지\s*않|없)")
 _PAST_FLIP = re.compile(r"(이었|였는데|었는데|았는데|였다가|었다가|더니)")  # 과거형 = 현재는 뒤집혔을 수 있음
 
+_GROUND_EVENT = r"(?:폐업|문\s*을?\s*닫|잠적|연락\s*두절|영업\s*중단|하자|불량|고장|무효|불성립|취소|해제|해지|청약\s*철회|철회)"
+_NEGATED_GROUND = re.compile(
+    _GROUND_EVENT
+    + r"\s*(?:(?:은|는|이|가|도|만)\s*)?"
+      r"(?:(?:한|된)\s*(?:것|건)\s*(?:은|이|도)?\s*)?"
+      r"(?:전혀\s*)?"
+      r"(?:안\s*(?:해|함|하|할|했|된|됐)|"
+      r"(?:하|되)?지(?:는|도|만|조차)?\s*않|"
+    + _NEG_CORE
+    + r"|없|커녕|(?:라고\s*)?(?:보|볼)\s*수\s*없|"
+      r"(?:라고\s*)?보기\s*어렵|(?:이라고\s*)?단정할\s*수\s*없)"
+)
+_GROUND_DENIAL = re.compile(
+    _GROUND_EVENT
+    + r".{0,16}(사실무근|오보|(?:라고|이라고)?\s*(?:보|볼)\s*수\s*없|"
+      r"(?:라고|이라고)?\s*보기(?:는|도)?\s*어렵|(?:이라고)?\s*단정할\s*수\s*없)"
+)
+_GROUND_QUESTION = re.compile(
+    r"(혹시|" + _GROUND_EVENT
+    + r".{0,8}(했나요|한가요|인가요|건가요|있나요|가능한가요|일까요|인지\s*(확인|궁금|모르)))"
+)
+_HEARSAY = re.compile(r"(소문|카더라|들었|전해\s*들|라던데|(?:라고|다고)\s*(합니다|해요|함))")
+_FUTURE_OR_HYPOTHETICAL = re.compile(
+    r"(예정|계획|가정|만약|대비|" + _GROUND_EVENT
+    + r".{0,8}(하면|이면|한다면|있다면|생기면|될\s*경우|할\s*경우|했을\s*때))"
+)
+_GROUND_REQUEST = re.compile(
+    r"(?:취소|해제|해지|청약\s*철회|철회).{0,10}"
+    r"(?:부탁|요청|문의|해\s*주|하고\s*싶|원해|원합니다|희망)"
+)
+
+
+def _has_nonfact_signal(reason_text):
+    """확정 사실이 아닌 부정·질문·전언·불확실·미래·요청 표현을 문장 전체에서 찾는다."""
+    rt = _norm(reason_text or "")
+    return any(rx.search(rt) for rx in (
+        _NEGATED_GROUND,
+        _GROUND_DENIAL,
+        _GROUND_QUESTION,
+        _HEARSAY,
+        _UNCERTAIN,
+        _FUTURE_OR_HYPOTHETICAL,
+        _GROUND_REQUEST,
+    ))
+
 
 def _find_ground(reason_text):
-    """법정 항변 사유 탐지 v3.
+    """법정 항변 사유 후보 탐지 v4.
 
-    반환: 라벨(str) | None(사유 미확인) | False(사유 아님 확정) | "UNCERTAIN"(불확실).
-    부정문("폐업하지 않았"/"안 망했"), 희망형("취소를 하고 싶다"), 불확실("폐업인 것 같다")은
-    사실로 취급하지 않는다 — possible 판정 금지.
+    반환: 사유 코드(str) | None(사유 미확인) | False(사유 아님 확정) |
+    "UNCERTAIN"(비확정). 이 함수는 후보·차단만 담당하며 권리를 확정하지 않는다.
     """
     rt = reason_text or ""
     m_ng = _NO_GROUND.search(rt)
@@ -256,28 +530,40 @@ def _find_ground(reason_text):
         # "정상 영업 중" = 사유 아님. 단 부정("~이 아니다")이나 과거형("~이었는데")이면 뒤집지 않음
         if not (_NEG_WIDE.search(ng_tail) or _PAST_FLIP.search(ng_tail)):
             return False
-    for label, rx in _GROUND_PATTERNS:
+    if _has_nonfact_signal(rt):
+        return "UNCERTAIN"
+    for code, rx in _GROUND_PATTERNS:
         m = re.search(rx, rt)
         if not m:
             continue
         pre = rt[max(0, m.start() - 4):m.start()]
         post = rt[m.end():m.end() + 20]
-        if re.search(r"안\s*$", pre) or _NEG_WIDE.search(post):
+        # 제16조 제1항 제5호 자체가 '계약 목적을 달성할 수 없음'을 요건으로 하므로,
+        # 이 코드의 '없음/불가'를 사유 부정으로 뒤집지 않는다.
+        post_is_negation = _NEG_WIDE.search(post) and code != "purpose_failed_by_breach"
+        if re.search(r"안\s*$", pre) or post_is_negation:
             continue  # 앞선/뒤따르는 부정 — 사실 아님
-        if _DESIRE.search(post[:12]):
-            continue  # 희망이지 발생 사실 아님
-        if _UNCERTAIN.search(post):
-            return "UNCERTAIN"  # 사실 여부 불확실 — 되물음
-        return label
+        return code
     return None
 
 
-def installment_defense(amount_won, months, has_remaining, reason_text=""):
-    """할부항변권 판정 v2.
+def installment_defense(
+    amount_won,
+    months,
+    has_remaining,
+    reason_text="",
+    *,
+    ground_code: Optional[InstallmentGroundCode] = None,
+    ground_confirmed: Optional[bool] = None,
+    ground_facts: Optional[List[InstallmentGroundFact]] = None,
+):
+    """할부항변권 안내 v4 — 자동 확정 없이 공식 확인 경로로 연결.
 
-    반환 (status, reasons, steps): status ∈ {"possible","not_met","review","need_info"}
-    - 수량 요건(20만원·3개월·잔여금)과 '법정 항변 사유'가 모두 있어야 possible.
-    - 사유가 없거나 불명확하면 review(추가 확인)로. 단정 금지.
+    반환 (status, reasons, steps): status ∈ {"not_met","review","need_info"}
+    - 수량 요건 + 유효한 ground_code + ground_confirmed is True + 해당 사유의
+      필수 ground_facts(같은 할부계약 범위 포함) + 문장 일치가 모두 필요.
+    - 모두 충족해 보여도 증빙 진위·동일 계약 관련성·법 적용을 독립 확인할 수 없으므로
+      자동 확정하지 않고 review와 카드사 공식 양식·상담 경로를 반환한다.
     """
     if amount_won is None or months is None:
         return "need_info", ["결제 총액과 할부 개월수를 알려주시면 판정해 드립니다"], []
@@ -299,33 +585,58 @@ def installment_defense(amount_won, months, has_remaining, reason_text=""):
         reasons.append("남은 할부금 없음(완납) — 항변권 대상이 아니며 별도 환불 절차 필요")
         quant_ok = False
 
-    ground = _find_ground(reason_text)
-
     if not quant_ok:
         return "not_met", reasons, [
             "항변권 요건이 안 되어도 방법이 있습니다:",
             "- 1372 상담 → 한국소비자원 피해구제",
             "- 소액이면 지급명령·소액사건심판(3,000만원 이하 금전 청구) 검토",
         ]
-    if ground is False:
-        reasons.append("사유: 단순변심·정상 제공 중이면 법정 항변 사유(미공급·하자·해지 등)에 해당하지 않습니다")
-        return "not_met", reasons, [
-            "항변권은 업체의 미공급·불이행 등이 있어야 합니다. 단순변심 해지는 위의 중도해지·청약철회 경로로 진행하세요 (1372 확인)",
-        ]
-    if ground == "UNCERTAIN":
-        reasons.append("항변 사유로 보이는 정황이 있으나 사실 여부가 불확실합니다(추측·전언 표현)")
+
+    # 구조화 값이 없으면 자유문장은 되물음·명백한 불성립 판정에만 사용한다.
+    # 어떤 긍정형 자유문장이나 구조값도 자동 권리 확정을 열 수 없다.
+    if ground_confirmed is not True:
+        ground = _find_ground(reason_text)
+        if ground is False:
+            reasons.append("사유: 단순변심·정상 제공 중이면 법정 항변 사유(미공급·하자·해지 등)에 해당하지 않습니다")
+            return "not_met", reasons, [
+                "항변권은 업체의 미공급·불이행 등이 있어야 합니다. 단순변심 해지는 위의 중도해지·청약철회 경로로 진행하세요 (1372 확인)",
+            ]
+        if ground == "UNCERTAIN":
+            reasons.append("항변 사유로 보이는 정황이 있으나 사실 여부가 불확실합니다(추측·전언 표현)")
+            return "review", reasons, [
+                "사실 확인이 먼저입니다: 홈택스 사업자등록상태 조회, 업체 공지·연락 기록 등으로 확인한 뒤 다시 알려주세요",
+            ]
+        reasons.append("항변 사유가 실제로 발생한 사실인지 확인이 필요합니다")
         return "review", reasons, [
-            "사실 확인이 먼저입니다: 홈택스 사업자등록상태 조회, 업체 공지·연락 기록 등으로 확인한 뒤 다시 알려주세요",
+            "업체 공지·계약서·서비스 중단 기록 등으로 확인된 사실과 실제 미이행 내용을 알려주세요",
         ]
-    if ground is None:
-        reasons.append("법정 항변 사유(미공급·폐업으로 인한 불이행·하자·계약 해제 등) 해당 여부가 확인되지 않았습니다")
+    if ground_code not in INSTALLMENT_GROUNDS:
+        reasons.append("법정 항변 사유의 종류가 확정되지 않았습니다")
         return "review", reasons, [
-            "무슨 문제가 있었는지(폐업·미공급·하자·계약해지 등)를 알려주시면 사유 해당 여부까지 판정해 드립니다",
+            "확인된 사실이 계약 무효·해지·미공급·하자담보 미이행·채무불이행·적법 철회 중 무엇인지 확인해 주세요",
         ]
-    reasons.append("항변 사유 후보: %s — 증빙으로 뒷받침 필요" % ground)
-    return "possible", reasons, [
-        "1. 카드사 콜센터에 '할부항변권 행사'를 문의하고 서면 양식 요청",
-        "2. 증빙(계약서·결제내역·폐업 조회·이행중단 증거) 첨부해 서면 제출 (서면 발송일에 효력)",
-        "3. 다음 결제일에 잔여 할부금 청구 중단 여부 확인",
-        "4. 카드사가 거부하면 금융감독원 1332",
+    required_facts = GROUND_REQUIRED_FACTS[ground_code]
+    provided_facts = frozenset(ground_facts or ())
+    if provided_facts != required_facts:
+        reasons.append("선택한 법정 사유의 필수 사실과 이 할부계약의 관련성이 모두 확인되지 않았습니다")
+        return "review", reasons, [
+            INSTALLMENT_GROUNDS[ground_code]["confirm"],
+        ]
+    if _contradicts_full_ground(reason_text, ground_code):
+        reasons.append("입력 문장에 선택한 항변 사유와 반대되는 사실이 함께 있어 판정을 확정할 수 없습니다")
+        return "review", reasons, [
+            "현재 실제 상태(정상 제공 여부·계약 유지 여부·철회 기간 등)를 다시 확인해 주세요",
+        ]
+    if not _matches_full_ground(reason_text, ground_code):
+        reasons.append("입력 문장만으로는 선택한 법정 항변 사유의 전체 요건이 확인되지 않습니다")
+        return "review", reasons, [
+            INSTALLMENT_GROUNDS[ground_code]["confirm"],
+        ]
+    ground_label = INSTALLMENT_GROUNDS[ground_code]["label"]
+    reasons.append("법정 사유 후보: %s" % ground_label)
+    reasons.append("증빙의 진위·동일 계약 관련성·법 적용은 이 도구가 독립 확인할 수 없어 자동 확정하지 않습니다")
+    return "review", reasons, [
+        "1. 카드사 콜센터에 할부항변권 담당 부서와 공식 서면 양식을 요청하세요",
+        "2. 계약서·결제내역과 해당 사유 증빙을 제출하고 적용 가능 여부를 서면으로 확인하세요",
+        "3. 해결되지 않으면 금융감독원 1332 또는 1372에서 확인하세요",
     ]
