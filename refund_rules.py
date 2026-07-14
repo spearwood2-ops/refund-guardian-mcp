@@ -34,8 +34,8 @@ def _has(text, rx, neg_aware=False):
 def extract_signals(text):
     t = _norm(text)
     return {
-        "online": _has(t, r"(쇼핑몰|온라인|인터넷|오픈마켓|스토어|앱에서|배송|택배|주문)"),
-        "offline": _has(t, r"(오프라인|매장에서|가게에서|백화점에서|직접\s*(가서|방문))"),
+        "online": _has(t, r"(쇼핑몰|온라인|인터넷|오픈마켓|스토어|앱에서|배송|택배|주문)", neg_aware=True),
+        "offline": _has(t, r"(오프라인|매장에서|가게에서|백화점에서|직접\s*(가서|방문))", neg_aware=True),
         "gym": _has(t, r"(헬스|피트니스|필라테스|요가|피티|PT|수영장|골프연습장|크로스핏)"),
         "academy": _has(t, r"(학원|어학원|과외|교습소|수강료|인강|강의)"),
         "closed": _has(t, r"(폐업|문\s*닫|먹튀|잠적|연락\s*(두절|안\s*됨|끊)|망했)", neg_aware=True),
@@ -128,11 +128,11 @@ KNOWLEDGE = {
         ],
     },
     "gym_quit": {
-        "verdict": "헬스장 등 계속거래는 계약기간 중 해지를 요구할 수 있는 경우가 많습니다(방문판매법 제31조). '환불 불가' 특약이 있어도 그대로 인정되지 않을 수 있습니다.",
+        "verdict": "헬스장 등 '계속거래'(1개월 이상 계속 공급 + 해지 시 환급 제한·위약금 약정이 있는 거래)는 계약기간 중 해지를 요구할 수 있는 경우가 많습니다(방문판매법 제31조). '환불 불가' 특약이 있어도 그대로 인정되지 않을 수 있습니다.",
         "checks": [
-            "환불 산식(소비자분쟁해결기준·소비자 사정 해지·기간제 기준): 개시 전 = 총이용금액의 10% 공제, 개시 후 = 경과 기간 이용금액 + 총이용금액의 10% 공제 (횟수제는 사용 횟수 비율)",
-            "사업자 잘못(시설 폐쇄·서비스 축소)으로 해지하는 경우는 반대로 사용분 공제 후 환급 + 총이용금액 10% 배상 방향",
-            "정확한 산식 적용은 계약 형태(기간제/횟수제)에 따라 달라짐 — 1372에서 확인",
+            "소비자 사정 해지(기간제): 개시 전 = 총이용금액의 10% 공제, 개시 후 = 경과 기간 이용금액 + 10% 공제(횟수제는 사용 횟수 비율)",
+            "사업자 잘못(시설 폐쇄 등)이면 반대로 사용분 공제 후 환급 + 총이용금액 10% 배상 방향",
+            "계약 형태별 정확한 산식은 1372에서 확인",
         ],
         "steps": [
             "기록이 남는 방법으로 해지 의사 통보(통보일 기준 정산)",
@@ -209,14 +209,33 @@ KNOWLEDGE = {
     },
 }
 
-# ---------- 할부항변권 (v2: 법정 사유 없이는 '충족' 반환 금지) ----------
+# ---------- 할부항변권 (v2.1: 법정 사유 — 부정문·희망형 오판 차단) ----------
 _GROUND_PATTERNS = [
+    ("계약 무효·불성립", r"(무효|불성립|성립.{0,6}(안|않))"),
     ("미공급·이행중단", r"(폐업|문\s*닫|먹튀|잠적|연락\s*두절|영업\s*중단|공급.{0,6}(안|못)|이행.{0,6}(안|못|중단)|서비스.{0,8}(중단|못\s*받))"),
     ("하자·불이행", r"(하자|불량|고장|약속.{0,8}(다르|어김|불이행)|계약.{0,8}(다르|위반))"),
     ("계약 취소·해제·해지", r"(취소|해제|해지)"),
     ("적법한 청약철회", r"(청약\s*철회|철회)"),
 ]
-_NO_GROUND = re.compile(r"(단순\s*변심|그냥\s*환불|정상\s*(제공|영업|운영)\s*중|문제.{0,4}없)")
+_NO_GROUND = re.compile(r"(단순\s*변심|그냥\s*(환불|취소|해지)|마음이\s*바뀌|정상\s*(제공|영업|운영)\s*중|문제.{0,4}없)")
+_DESIRE = re.compile(r"^(하고\s*싶|하려|할래|할까|하면\s*좋|했으면)")  # 희망형 = 사실 아님
+
+
+def _find_ground(reason_text):
+    """법정 항변 사유 탐지 — 부정문(폐업하지 않았)과 희망형(취소하고 싶어)은 사유로 안 봄."""
+    rt = reason_text or ""
+    if _NO_GROUND.search(rt):
+        return False
+    for label, rx in _GROUND_PATTERNS:
+        m = re.search(rx, rt)
+        if not m:
+            continue
+        if _negated(rt, m.end()):
+            continue  # "폐업하지 않았어요" 류
+        if _DESIRE.match(rt[m.end():m.end() + 8]):
+            continue  # "취소하고 싶어요" = 희망이지 발생 사실 아님
+        return label
+    return None
 
 
 def installment_defense(amount_won, months, has_remaining, reason_text=""):
@@ -246,15 +265,7 @@ def installment_defense(amount_won, months, has_remaining, reason_text=""):
         reasons.append("남은 할부금 없음(완납) — 항변권 대상이 아니며 별도 환불 절차 필요")
         quant_ok = False
 
-    ground = None
-    rt = reason_text or ""
-    if _NO_GROUND.search(rt):
-        ground = False
-    else:
-        for label, rx in _GROUND_PATTERNS:
-            if re.search(rx, rt):
-                ground = label
-                break
+    ground = _find_ground(reason_text)
 
     if not quant_ok:
         return "not_met", reasons, [

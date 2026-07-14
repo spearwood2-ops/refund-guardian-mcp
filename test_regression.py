@@ -29,9 +29,10 @@ ADV = [
     ("판매자가 환불을 거부한 인터넷 쇼핑몰입니다.", {"online_refuse"}),
     ("전화권유로 가입한 정기결제를 3일 만에 취소하고 싶어요.", {"door_sale"}),
     ("전화권유를 받았지만 계약하지 않았고, 기존 구독만 해지하려고요.", {"subscribe"}),
-    ("오프라인 매장에서 산 신발이 사이즈가 안 맞아 반품하고 싶어요.", {"offline_purchase", "general"}),  # 전자상거래법 미적용이 핵심
-    ("학원 원장이 잠적해서 남은 수강료를 환불받고 싶어요.", {"academy", "biz_close"}),  # 학원법 분리가 핵심
+    ("오프라인 매장에서 산 신발이 사이즈가 안 맞아 반품하고 싶어요.", {"offline_purchase"}),  # 전자상거래법 미적용 (오라클 단일 고정)
+    ("학원 원장이 잠적해서 남은 수강료를 환불받고 싶어요.", {"academy"}),  # 학원법 분리 (오라클 단일 고정)
     ("상조는 아니고 장례식장 계약금 환불 문제예요.", {"general"}),
+    ("온라인은 아니고 매장에서 직접 샀는데 환불 되나요?", {"offline_purchase"}),  # 채널 부정문
 ]
 for i, (txt, expected) in enumerate(ADV, 1):
     cid, label, clarify = classify(txt)
@@ -50,6 +51,22 @@ st, _, _ = installment_defense(900000, 1, True, "폐업")
 check("항변권: 일시불 → 불성립", st == "not_met", "→ %s" % st)
 st, _, _ = installment_defense(900000, 6, False, "폐업")
 check("항변권: 완납 → 불성립", st == "not_met", "→ %s" % st)
+
+# 2-1) checker 재검증 지적: 부정문·희망형 사유, 정확 경계값
+st, _, _ = installment_defense(900000, 6, True, "폐업하지 않았어요")
+check("항변권: 사유 부정문 → possible 금지", st in ("review", "not_met"), "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "그냥 취소하고 싶어요")
+check("항변권: 희망형 취소 → 불성립", st == "not_met", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "계약이 무효라고 생각합니다")
+check("항변권: 무효 주장 → 사유 인정", st == "possible", "→ %s" % st)
+st, _, _ = installment_defense(199999, 6, True, "폐업")
+check("항변권: 199,999원 경계 → 불성립", st == "not_met", "→ %s" % st)
+st, _, _ = installment_defense(200000, 6, True, "폐업")
+check("항변권: 200,000원 경계 → 가능성", st == "possible", "→ %s" % st)
+st, _, _ = installment_defense(900000, 2, True, "폐업")
+check("항변권: 2개월 경계 → 불성립", st == "not_met", "→ %s" % st)
+st, _, _ = installment_defense(900000, 3, True, "폐업")
+check("항변권: 3개월 경계 → 가능성", st == "possible", "→ %s" % st)
 
 # 3) 출력 길이(첫 응답 ≈500자, 여유 550) + 이모지 0
 import re as _re
@@ -70,8 +87,16 @@ r = server.generate_refund_letter("판매자")
 check("내용증명: 정보 없으면 질문", "필요합니다" in r)
 r = server.generate_refund_letter("몰라요")
 check("내용증명: 수신인 불명 → 질문", "수신인" in r)
-r = server.generate_refund_letter("카드사", "OO필라테스", "6개월 이용권", "900,000원", "폐업으로 서비스 중단")
-check("내용증명: 카드사 → 항변 통지·초안 표기", "할부항변권" in r and "초안" in r)
+r = server.generate_refund_letter("카드사", "OO필라테스", "6개월 이용권", "900,000원", "폐업으로 서비스 중단", amount_won=900000, installment_months=6)
+check("내용증명: 카드사(요건 충족) → 항변 통지·초안 표기", "할부항변권" in r and "초안" in r)
+
+# 4-1) checker 재검증 지적: 카드사 통지서 게이트 우회 차단
+r = server.generate_refund_letter("카드사", "OO필라테스", "이용권", "10만원", "폐업")
+check("카드사 통지: 금액·개월 미제공 → 질문", "할부 개월수" in r or "알려주세요" in r, )
+r = server.generate_refund_letter("카드사", "OO필라테스", "이용권", "100,000원", "폐업", amount_won=100000, installment_months=6)
+check("카드사 통지: 10만원(요건 미달) → 생성 거부", "만들지 않았습니다" in r)
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "단순 변심이고 정상 영업 중", amount_won=900000, installment_months=6)
+check("카드사 통지: 변심·정상제공 → 생성 거부", "만들지 않았습니다" in r)
 
 print()
 if FAILS:

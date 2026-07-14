@@ -9,7 +9,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from refund_rules import classify, KNOWLEDGE, installment_defense
+from refund_rules import classify, KNOWLEDGE, installment_defense  # noqa: E501
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
@@ -74,12 +74,13 @@ def check_installment_defense(amount_won: int, installment_months: int, has_rema
 
 
 @mcp.tool()
-def generate_refund_letter(recipient: str, business_name: str = "", item: str = "", amount: str = "", situation: str = "") -> str:
+def generate_refund_letter(recipient: str, business_name: str = "", item: str = "", amount: str = "", situation: str = "", amount_won: int = 0, installment_months: int = 0) -> str:
     """Draft (초안) a formal notice — recipient must be "판매자" (demand letter / 내용증명) or "카드사" (할부항변 통지).
 
-    All facts (business_name, item, amount, situation) are required; if any is missing,
-    the tool asks for it instead of generating. Output is a DRAFT the user must review;
-    it cites only the relevant path for the chosen recipient.
+    All facts (business_name, item, amount, situation) are required. For "카드사",
+    amount_won and installment_months are ALSO required and the statutory installment-defense
+    conditions are checked first — a notice is generated only when the defense is plausible.
+    Output is a DRAFT the user must review.
     """
     missing = [n for n, v in (("업체명", business_name), ("계약 내용", item), ("금액", amount), ("상황", situation)) if not str(v).strip()]
     if recipient not in ("판매자", "카드사"):
@@ -88,6 +89,16 @@ def generate_refund_letter(recipient: str, business_name: str = "", item: str = 
         return "초안 작성에 다음 정보가 필요합니다: %s. 하나씩 알려주세요." % ", ".join(missing)
 
     if recipient == "카드사":
+        # 항변권 게이트: 요건 판정을 통과해야만 통지서 생성 (우회 금지)
+        if not amount_won or not installment_months:
+            return "카드사 할부항변 통지는 요건 확인이 먼저 필요합니다. 결제 총액(원)과 할부 개월수를 알려주세요."
+        status, reasons, _steps = installment_defense(amount_won, installment_months, True, situation)
+        if status == "not_met":
+            return "\n".join(["할부항변권 요건에 해당하지 않아 카드사 통지서를 만들지 않았습니다.", ""]
+                             + ["- " + r for r in reasons]
+                             + ["", "대신 판매자 대상 환불 요구(내용증명)나 1372 상담 경로를 이용하세요.", "", _NOTE])
+        if status == "review":
+            return "\n".join(["항변 사유 확인이 먼저 필요합니다. 무슨 문제가 있었는지(폐업·미공급·하자·계약해지 등) 알려주세요.", "", _NOTE])
         body = [
             "[초안] 할부항변권 행사 통지 (할부거래법 제16조)",
             "",
