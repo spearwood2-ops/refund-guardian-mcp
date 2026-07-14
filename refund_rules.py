@@ -16,14 +16,14 @@ def _norm(t):
     return re.sub(r"\s+", " ", t.strip())
 
 
-def _negated(text, m_start, patterns=(r"하지\s*않", r"않았", r"안\s*했", r"는\s*아니", r"이\s*아니", r"아니고", r"아니에요", r"아닙니다", r"없")):
+def _negated(text, m_start, patterns=(r"하지\s*않", r"않았", r"안\s*했", r"아(니|닌|님|냐|닐)", r"없")):
     """매치 지점 뒤 12자 내 부정어가 있으면 그 신호를 무효화."""
     tail = text[m_start:m_start + 16]
     return any(re.search(p, tail) for p in patterns)
 
 
-# 명사(업종·채널) 부정: "학원은 아니고", "온라인 말고" — 동사 부정(하지 않)과 구분
-_NOUN_NEG = (r"^(은|는|이|가)?\s*(아니|말고)",)
+# 명사(업종·채널) 부정: "학원은 아니고", "학원 수업은 아니고", "온라인 거래가 아닌데" — 동사 부정(하지 않)과 구분
+_NOUN_NEG = (r"^\s*[가-힣]{0,4}\s*(은|는|이|가)?\s*(아니|아닌|아님|아냐|말고)",)
 
 
 def _has(text, rx, neg_aware=False, neg_patterns=None):
@@ -32,7 +32,7 @@ def _has(text, rx, neg_aware=False, neg_patterns=None):
         return False
     if neg_aware:
         if neg_patterns:
-            tail = text[m.end():m.end() + 8]
+            tail = text[m.end():m.end() + 12]
             if any(re.search(p, tail) for p in neg_patterns):
                 return False
         elif _negated(text, m.end()):
@@ -47,7 +47,7 @@ def extract_signals(text):
         "offline": _has(t, r"(오프라인|매장에서|가게에서|백화점에서|직접\s*(가서|방문))", neg_aware=True, neg_patterns=_NOUN_NEG),
         "gym": _has(t, r"(헬스|피트니스|필라테스|요가|피티|PT|수영장|골프연습장|크로스핏)", neg_aware=True, neg_patterns=_NOUN_NEG),
         "academy": _has(t, r"(학원|어학원|과외|교습소|수강료|인강|강의)", neg_aware=True, neg_patterns=_NOUN_NEG),
-        "closed": _has(t, r"(폐업|문\s*닫|먹튀|잠적|연락\s*(두절|안\s*됨|끊)|망했)", neg_aware=True),
+        "closed": _has(t, r"(폐업|문\s*을?\s*닫|먹튀|잠적|연락\s*(두절|안\s*됨|끊)|망했)", neg_aware=True),
         "quit": _has(t, r"(중도\s*해지|해지|그만\s*다니|환불받|남은\s*(기간|돈|횟수|수강))"),
         "refuse": _has(t, r"(거부|거절|안\s*(해줘|해준)|못\s*받|무시)"),
         "change_mind": _has(t, r"(단순\s*변심|사이즈|색상|맘에\s*안|잘못\s*샀|안\s*맞)"),
@@ -224,14 +224,14 @@ KNOWLEDGE = {
 # ---------- 할부항변권 (v2.1: 법정 사유 — 부정문·희망형 오판 차단) ----------
 _GROUND_PATTERNS = [
     ("계약 무효·불성립", r"(무효|불성립|성립.{0,6}(안|않))"),
-    ("미공급·이행중단", r"(폐업|문\s*닫|먹튀|잠적|연락\s*두절|영업\s*중단|공급.{0,6}(안|못)|이행.{0,6}(안|못|중단)|서비스.{0,8}(중단|못\s*받))"),
+    ("미공급·이행중단", r"(폐업|문\s*을?\s*닫|먹튀|잠적|연락\s*두절|영업\s*중단|공급.{0,6}(안|못)|이행.{0,6}(안|못|중단)|서비스.{0,8}(중단|못\s*받))"),
     ("하자·불이행", r"(하자|불량|고장|약속.{0,8}(다르|어김|불이행)|계약.{0,8}(다르|위반))"),
     ("계약 취소·해제·해지", r"(취소|해제|해지)"),
     ("적법한 청약철회", r"(청약\s*철회|철회)"),
 ]
 _NO_GROUND = re.compile(r"(단순\s*변심|그냥\s*(환불|취소|해지)|마음이\s*바뀌|정상\s*(제공|영업|운영)\s*중|문제.{0,4}없)")
-_DESIRE = re.compile(r"(하고\s*싶|하려|할래|할까|하면\s*좋|했으면)")          # 희망형 = 사실 아님
-_UNCERTAIN = re.compile(r"(것\s*같|듯\s*하|듯한|모르겠|아닌지|인지\s*모| 카더라|들었어|들은\s*것)")  # 불확실 = 판정보류
+_DESIRE = re.compile(r"(하고\s*싶|싶습니다|싶어요|하려|할래|할까|하면\s*좋|했으면|희망|원해|원합니다|바랍니다)")  # 희망형 = 사실 아님
+_UNCERTAIN = re.compile(r"(것\s*같|듯\s*하|듯한|모르겠|아닌지|인지\s*모| 카더라|들었어|들은\s*것|의심|의문|추정|아닐까)")  # 불확실 = 판정보류
 _NEG_WIDE = re.compile(r"(하지\s*않|않았|안\s*(했|됐|당했|한)|는\s*아니|이\s*아니|가\s*아니|아니고|아니에요|아닙니다|아닐|아닌|같지\s*않|없)")
 
 
@@ -243,7 +243,9 @@ def _find_ground(reason_text):
     사실로 취급하지 않는다 — possible 판정 금지.
     """
     rt = reason_text or ""
-    if _NO_GROUND.search(rt):
+    m_ng = _NO_GROUND.search(rt)
+    if m_ng and not _NEG_WIDE.search(rt[m_ng.end():m_ng.end() + 12]):
+        # "정상 영업 중" = 사유 아님. 단 "정상 영업 중이 아니다"처럼 부정되면 뒤집지 않음
         return False
     for label, rx in _GROUND_PATTERNS:
         m = re.search(rx, rt)

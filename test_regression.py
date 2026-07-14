@@ -33,8 +33,10 @@ ADV = [
     ("학원 원장이 잠적해서 남은 수강료를 환불받고 싶어요.", {"academy"}),  # 학원법 분리 (오라클 단일 고정)
     ("상조는 아니고 장례식장 계약금 환불 문제예요.", {"general"}),
     ("온라인은 아니고 매장에서 직접 샀는데 환불 되나요?", {"offline_purchase"}),  # 채널 부정문
-    ("학원은 아니고 헬스장 환불 문제예요.", {"gym_quit", "gym_close"}),  # 업종 부정문
+    ("학원은 아니고 헬스장 환불 문제예요.", {"gym_quit"}),  # 업종 부정문 (단일 오라클)
     ("온라인으로 주문하고 매장에서 수령했는데 환불 되나요?", {"general"}),  # 혼합 채널 → 단정 금지
+    ("학원 수업은 아니고 헬스 PT 환불 문제예요.", {"gym_quit"}),  # 조사·수식어 낀 업종 부정
+    ("온라인 거래가 아닌데, 매장에서 산 물건 환불 되나요?", {"offline_purchase"}),  # 조사 낀 채널 부정
 ]
 for i, (txt, expected) in enumerate(ADV, 1):
     cid, label, clarify = classify(txt)
@@ -70,15 +72,25 @@ check("항변권: 2개월 경계 → 불성립", st == "not_met", "→ %s" % st)
 st, _, _ = installment_defense(900000, 3, True, "폐업")
 check("항변권: 3개월 경계 → 가능성", st == "possible", "→ %s" % st)
 
-# 2-2) v2.1 재검증 지적: 불확실·변형 부정·희망형 잔존 경로
+# 2-2) v2.1 재검증 지적: 불확실·변형 부정·희망형 잔존 경로 (정확 상태 오라클)
 st, _, _ = installment_defense(900000, 6, True, "폐업인 것 같아요")
-check("항변권: 불확실(것 같다) → possible 금지", st != "possible", "→ %s" % st)
+check("항변권: 불확실(것 같다) → review", st == "review", "→ %s" % st)
 st, _, _ = installment_defense(900000, 6, True, "취소를 하고 싶습니다")
-check("항변권: 희망형(를 하고 싶다) → possible 금지", st != "possible", "→ %s" % st)
+check("항변권: 희망형(를 하고 싶다) → review", st == "review", "→ %s" % st)
 st, _, _ = installment_defense(900000, 6, True, "안 망했어요, 잘 다니고 있어요")
-check("항변권: 앞선 부정(안 망했) → possible 금지", st != "possible", "→ %s" % st)
+check("항변권: 앞선 부정(안 망했) → review", st == "review", "→ %s" % st)
 st, _, _ = installment_defense(900000, 6, True, "폐업했다고 들었어요")
-check("항변권: 전언(들었다) → possible 금지", st != "possible", "→ %s" % st)
+check("항변권: 전언(들었다) → review", st == "review", "→ %s" % st)
+
+# 2-3) v2.2 재검증 지적: 의심·희망 표현, no-ground 반전, 잔여금 기본값
+st, _, _ = installment_defense(900000, 6, True, "폐업이 의심됩니다")
+check("항변권: 의심 표현 → review", st == "review", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "계약 해지를 희망합니다")
+check("항변권: 희망합니다 → review", st == "review", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "정상 영업 중이 아니에요, 문을 닫았어요")
+check("항변권: 부정된 no-ground(영업중 아님)+폐업 → possible", st == "possible", "→ %s" % st)
+r = server.check_installment_defense(900000, 6)
+check("공개 판정 도구: 잔여금 미입력 → 질문(기본값 금지)", "남아 있나요" in r)
 
 # 3) 출력 길이(첫 응답 ≈500자, 여유 550) + 이모지 0
 import re as _re
@@ -108,7 +120,9 @@ check("카드사 통지: 금액·개월 미제공 → 질문", "할부 개월수
 r = server.generate_refund_letter("카드사", "OO필라테스", "이용권", "100,000원", "폐업", amount_won=100000, installment_months=6, has_remaining_balance=True)
 check("카드사 통지: 10만원(요건 미달) → 생성 거부", "만들지 않았습니다" in r)
 r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "단순 변심이고 정상 영업 중", amount_won=900000, installment_months=6, has_remaining_balance=True)
-check("카드사 통지: 변심·정상제공 → 생성 거부", "만들지 않았습니다" in r)
+check("카드사 통지: 변심·정상제공 → 생성 거부 + 초안 없음", "만들지 않았습니다" in r and "[초안]" not in r)
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "폐업이 의심됩니다", amount_won=900000, installment_months=6, has_remaining_balance=True)
+check("카드사 통지: 의심 사유 → 초안 미생성(사실 확인 요구)", "[초안]" not in r)
 
 # 4-2) v2.1 재검증 지적: 잔여할부금 하드코딩·금액 불일치
 r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "폐업", amount_won=900000, installment_months=6)

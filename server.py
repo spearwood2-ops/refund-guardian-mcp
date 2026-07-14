@@ -52,14 +52,16 @@ def check_refund_right(situation: str) -> str:
 
 
 @mcp.tool()
-def check_installment_defense(amount_won: int, installment_months: int, has_remaining_balance: bool = True, reason: str = "") -> str:
-    """Assess 할부항변권 (할부거래법 제16조) — requires BOTH quantity conditions and a statutory ground.
+def check_installment_defense(amount_won: int, installment_months: int, has_remaining_balance: Optional[bool] = None, reason: str = "") -> str:
+    """Assess 할부항변권 (할부거래법 제16조) — requires quantity conditions AND a statutory ground.
 
     amount_won: total price. installment_months: card installment period.
-    has_remaining_balance: unpaid installments remain. reason: WHAT went wrong
-    (폐업/미공급/하자/계약해지 등 — required for a positive assessment).
-    Returns possible / not met / needs review — never an unconditional guarantee.
+    has_remaining_balance: whether unpaid installments remain — REQUIRED (ask the user;
+    do not guess). reason: WHAT went wrong (폐업/미공급/하자/계약해지 등 — required
+    for a positive assessment). Returns possible / not met / needs review.
     """
+    if has_remaining_balance is None:
+        return "아직 내지 않은 할부금(잔여 할부금)이 남아 있나요? 항변권은 남은 할부금에만 행사할 수 있어 이 확인이 필요합니다.\n\n" + _NOTE
     status, reasons, steps = installment_defense(amount_won, installment_months, has_remaining_balance, reason)
     heads = {
         "possible": "판단: 항변권 행사 가능성이 있습니다 (미지급 잔여 할부금 대상, 카드사 서면 통지 필요)",
