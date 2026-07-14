@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""환불 지킴이 — MCP 서버 (무인증, Streamable HTTP).
+"""환불 지킴이 v2 — MCP 서버 (무인증, Streamable HTTP).
 
-목적: 포기했던 환불 — 법이 보장한 내 돈을 돌려받게 한다.
-근거: 헬스장 등 선결제 피해구제 3년 14,857건, 온라인 환불 거부 분쟁 상시.
-청약철회·중도해지·할부항변권은 명문 규정 — 몰라서 못 쓰는 권리를 대화로 찾아준다.
-
-판정은 참고 정보(법률 자문 아님). 최종 확인 1372. 출력: 이모지 금지·중요도순·간결.
+환불 권리와 대응 절차를 확인하도록 돕는다(회수 보장 아님).
+checker P0 반영: 결론(조건부) 우선 출력·간결(≈500자)·내부 라벨 미노출·
+사실 부족 시 '추가 확인 필요'·수신인별 문서 분리.
 """
 import os
 
@@ -23,114 +21,126 @@ _ts = (TransportSecuritySettings(enable_dns_rebinding_protection=True,
 
 mcp = FastMCP("refund-guardian", host=HOST, port=PORT, transport_security=_ts)
 
-_DISCLAIMER = ("본 안내는 법령·소비자분쟁해결기준에 근거한 참고 정보이며 법률 자문이 아닙니다. "
-               "정확한 판단은 1372 소비자상담센터(국번없이 1372)에서 무료로 확인하세요.")
+_NOTE = "참고 정보이며 법률 자문이 아닙니다. 1372 소비자상담센터(상담료 없음, 통화료 발신자 부담, 평일 9-18시·점심 12-13시 제외)에서 확인하세요."
+
+
+def _render(k, clarify=None, max_checks=3, max_steps=3):
+    out = [k["verdict"], ""]
+    if clarify:
+        out += ["확인 필요: " + clarify, ""]
+    out.append("확인할 것")
+    out += ["- " + c for c in k["checks"][:max_checks]]
+    out += ["", "지금 할 일"]
+    out += ["%d. %s" % (i + 1, s) for i, s in enumerate(k["steps"][:max_steps])]
+    out += ["", _NOTE]
+    return "\n".join(out)
 
 
 @mcp.tool()
 def check_refund_right(situation: str) -> str:
-    """Identify the user's legal refund rights for a Korean consumer dispute.
+    """Identify likely legal refund rights for a Korean consumer dispute (conditional, never absolute).
 
-    THE core tool. Describe any refund situation in Korean (헬스장 폐업/중도해지,
-    온라인쇼핑 환불 거부, 단순변심 반품, 방문판매, 구독 해지, 상조, 업체 잠적 등)
-    and get: which law applies (전자상거래법 7일 청약철회, 방문판매법 14일,
-    계속거래 중도해지, 할부항변권), the exact conditions/deadlines, and next steps.
+    Describe the situation in Korean (헬스장 폐업/중도해지, 학원, 온라인 환불 거부,
+    오프라인 구매, 방문판매, 구독, 상조, 업체 잠적 등). Returns: the applicable law
+    and conditions, what facts to confirm, and next steps. If key facts are missing,
+    it asks ONE clarifying question instead of guessing.
     """
-    cid, label = classify(situation)
-    k = KNOWLEDGE[cid]
-    out = ["상황 분류: %s" % label, "", "내 권리", k["right"], ""]
-    out.append("요건·기준")
-    out += ["- " + c for c in k["conditions"]]
-    out += ["", "지금 할 일"]
-    out += ["%d. %s" % (i + 1, s) if not s.startswith("-") else s for i, s in enumerate(k["steps"])]
-    out += ["", _DISCLAIMER]
-    return "\n".join(out)
+    cid, label, clarify = classify(situation)
+    return _render(KNOWLEDGE[cid], clarify)
 
 
 @mcp.tool()
 def check_installment_defense(amount_won: int, installment_months: int, has_remaining_balance: bool = True, reason: str = "") -> str:
-    """Determine whether 할부항변권 (Installment Defense Right, 할부거래법 제16조) applies.
+    """Assess 할부항변권 (할부거래법 제16조) — requires BOTH quantity conditions and a statutory ground.
 
-    For paid-in-advance services that closed down (헬스장 먹튀 등) or undelivered goods,
-    paid by credit-card installment. Requirements are statutory: total >= 200,000 KRW
-    AND installment period >= 3 months AND remaining balance exists. Returns a clear
-    성립/불성립 verdict with reasons and the exact card-company procedure.
+    amount_won: total price. installment_months: card installment period.
+    has_remaining_balance: unpaid installments remain. reason: WHAT went wrong
+    (폐업/미공급/하자/계약해지 등 — required for a positive assessment).
+    Returns possible / not met / needs review — never an unconditional guarantee.
     """
-    ok, reasons, steps = installment_defense(amount_won, installment_months, has_remaining_balance, reason)
-    if ok is None:
-        head = "판정 불가 — 정보가 더 필요합니다"
-    elif ok:
-        head = "판정: 할부항변권 행사 요건 충족 (할부거래법 제16조)"
-    else:
-        head = "판정: 할부항변권 요건 미충족 — 다른 구제 수단 안내"
-    out = [head, ""]
+    status, reasons, steps = installment_defense(amount_won, installment_months, has_remaining_balance, reason)
+    heads = {
+        "possible": "판단: 항변권 행사 가능성이 있습니다 (미지급 잔여 할부금 대상, 카드사 서면 통지 필요)",
+        "not_met": "판단: 항변권 요건에 해당하지 않는 것으로 보입니다",
+        "review": "판단 보류: 법정 항변 사유 확인이 더 필요합니다",
+        "need_info": "정보가 더 필요합니다",
+    }
+    out = [heads[status], ""]
     out += ["- " + r for r in reasons]
     if steps:
-        out += ["", "지금 할 일"] + steps
-    out += ["", _DISCLAIMER]
+        out += ["", "다음 단계"] + steps
+    out += ["", _NOTE]
     return "\n".join(out)
 
 
 @mcp.tool()
-def generate_refund_letter(business_name: str, item: str, amount: str, situation: str, request: str = "환불") -> str:
-    """Draft a formal Korean demand letter (내용증명) or card-company installment-defense notice.
+def generate_refund_letter(recipient: str, business_name: str = "", item: str = "", amount: str = "", situation: str = "") -> str:
+    """Draft (초안) a formal notice — recipient must be "판매자" (demand letter / 내용증명) or "카드사" (할부항변 통지).
 
-    Provide business name, what was purchased, amount, what happened, and what you demand.
-    Returns a ready-to-send draft the user can adapt and send via 우체국 내용증명
-    (or submit to their card company for 할부항변).
+    All facts (business_name, item, amount, situation) are required; if any is missing,
+    the tool asks for it instead of generating. Output is a DRAFT the user must review;
+    it cites only the relevant path for the chosen recipient.
     """
-    body = [
-        "제목: %s 청구의 건" % request,
-        "",
-        "수신: %s" % business_name,
-        "발신: (성명·연락처·주소 기재)",
-        "",
-        "1. 본인은 귀사와 아래와 같이 계약을 체결하였습니다.",
-        "   - 계약 내용: %s" % item,
-        "   - 결제 금액: %s" % amount,
-        "",
-        "2. 그러나 다음과 같은 사유가 발생하였습니다.",
-        "   - %s" % situation.strip(),
-        "",
-        "3. 이에 본인은 관련 법령(전자상거래법·방문판매법·할부거래법 및 소비자분쟁해결기준)에 따라",
-        "   %s을(를) 요청하며, 본 통지 수령일로부터 14일 이내에 처리해 주시기 바랍니다." % request,
-        "",
-        "4. 기한 내 처리되지 않을 경우 한국소비자원 피해구제 신청 및 관련 법적 절차를",
-        "   진행할 예정임을 알려드립니다.",
-        "",
-        "20    년    월    일",
-        "발신인:            (서명)",
-    ]
-    guide = [
-        "발송 방법",
-        "- 우체국 방문 또는 인터넷우체국(epost.go.kr)에서 '내용증명'으로 발송 (사본 3부: 발송용·보관용·우체국 보관)",
-        "- 카드 할부 건이면 이 초안을 '할부항변권 행사 통지서' 제목으로 바꿔 카드사에 제출할 수 있습니다",
-        "- 계약서·결제내역·대화 캡처를 함께 보관하세요",
-    ]
-    return "\n".join(["내용증명 초안", "=" * 24] + body + ["", ""] + guide + ["", _DISCLAIMER])
+    missing = [n for n, v in (("업체명", business_name), ("계약 내용", item), ("금액", amount), ("상황", situation)) if not str(v).strip()]
+    if recipient not in ("판매자", "카드사"):
+        return "수신인을 알려주세요: 업체(판매자)에게 보내는 요구서인가요, 카드사에 내는 할부항변 통지인가요?"
+    if missing:
+        return "초안 작성에 다음 정보가 필요합니다: %s. 하나씩 알려주세요." % ", ".join(missing)
+
+    if recipient == "카드사":
+        body = [
+            "[초안] 할부항변권 행사 통지 (할부거래법 제16조)",
+            "",
+            "수신: (카드사명) 귀중",
+            "발신: (성명·생년월일·연락처)",
+            "",
+            "1. 본인은 %s와 아래 계약을 체결하고 귀사 신용카드 할부로 결제하였습니다." % business_name,
+            "   - 계약 내용: %s / 결제 금액: %s (할부)" % (item, amount),
+            "2. 발생한 문제: %s" % situation.strip(),
+            "3. 위 사유로 할부거래법 제16조에 따라 잔여 할부금 지급 거절 의사를 통지합니다.",
+            "   증빙(계약서·결제내역·사업자등록상태 조회 등)을 첨부합니다.",
+            "",
+            "(작성일·서명. 카드번호 등은 카드사 양식에 따라 기재)",
+            "",
+            "안내: 카드사 자체 양식이 있는 경우가 많으니 콜센터에 먼저 문의하세요. 서면 발송일에 효력이 생깁니다.",
+        ]
+    else:
+        body = [
+            "[초안] 환불 요구 통지 (내용증명용)",
+            "",
+            "수신: %s" % business_name,
+            "발신: (성명·연락처·주소)",
+            "",
+            "1. 계약 내용: %s / 결제 금액: %s" % (item, amount),
+            "2. 발생한 문제: %s" % situation.strip(),
+            "3. 이에 관련 법령 및 소비자분쟁해결기준에 따른 환불을 요청합니다.",
+            "   회신 기한: 수령일부터 14일 (기한 도과 시 한국소비자원 피해구제 등 절차 진행 예정)",
+            "",
+            "(작성일·서명)",
+            "",
+            "발송: 우체국 또는 인터넷우체국(epost.go.kr) 내용증명. 계약서·결제내역 사본 보관.",
+        ]
+    body += ["", "이 문서는 초안입니다. 사실관계를 확인·수정한 뒤 발송하세요. " + _NOTE]
+    return "\n".join(body)
 
 
 @mcp.tool()
 def refund_channels(case_type: str = "일반") -> str:
-    """List official Korean consumer-remedy channels and how to check if a business closed.
-
-    Returns: 1372 hotline, 한국소비자원 procedures, 홈택스 business-status lookup,
-    금감원, small-claims court — ordered by what to do first.
-    """
-    out = [
-        "환불 분쟁 구제 채널 (순서대로)",
-        "",
-        "1. 1372 소비자상담센터 — 국번없이 1372, 평일 9~18시. 무료 상담으로 내 사건의 정확한 절차 확인",
-        "2. 한국소비자원 피해구제 — kca.go.kr 온라인 신청. 합의 권고 → 분쟁조정까지 무료",
-        "3. 업체 폐업 확인 — 홈택스(hometax.go.kr) '사업자등록상태 조회'에 사업자번호 입력 (무료)",
-        "4. 카드 결제 분쟁 — 카드사 민원 → 해결 안 되면 금융감독원 1332",
-        "5. 소액 민사 — 3,000만원 이하는 소액사건심판(변호사 없이 가능), 지급명령 신청도 검토",
-        "",
-        "상조 가입자: 공정위 '내상조 찾아줘'(mysangjo.or.kr)에서 예치기관 확인",
-        "",
-        _DISCLAIMER,
-    ]
-    return "\n".join(out)
+    """Official Korean consumer-remedy channels, filtered by case (폐업/카드/상조/일반)."""
+    base = ["1. 1372 소비자상담센터 — 국번없이 1372. 내 사건의 정확한 절차 확인(상담료 없음·통화료 발신자 부담)",
+            "2. 한국소비자원 피해구제 — kca.go.kr 온라인 신청(무료)"]
+    t = case_type
+    extra = []
+    if any(k in t for k in ("폐업", "잠적", "먹튀")):
+        extra = ["3. 홈택스 '사업자등록상태 조회' — 사업자번호로 폐업 확인(무료·로그인 불필요, 세법상 등록 상태 기준)",
+                 "4. 소액사건심판·지급명령 — 3,000만원 이하 금전 청구, 변호사 없이 가능"]
+    elif any(k in t for k in ("카드", "할부")):
+        extra = ["3. 카드사 민원 접수(할부항변·이의제기)", "4. 해결 안 되면 금융감독원 1332"]
+    elif "상조" in t:
+        extra = ["3. 공정위 '내상조 찾아줘'(mysangjo.or.kr) — 가입·보전기관·보전액 확인"]
+    else:
+        extra = ["3. 카드 결제 분쟁은 카드사 민원 → 금융감독원 1332", "4. 소액이면 소액사건심판(3,000만원 이하) 검토"]
+    return "\n".join(["환불 분쟁 구제 채널 (순서대로)", ""] + base + extra + ["", _NOTE])
 
 
 if __name__ == "__main__":
