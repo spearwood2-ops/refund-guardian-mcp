@@ -51,7 +51,7 @@ def extract_signals(text):
         "quit": _has(t, r"(중도\s*해지|해지|그만\s*다니|환불받|남은\s*(기간|돈|횟수|수강))"),
         "refuse": _has(t, r"(거부|거절|안\s*(해줘|해준)|못\s*받|무시)"),
         "change_mind": _has(t, r"(단순\s*변심|사이즈|색상|맘에\s*안|잘못\s*샀|안\s*맞)"),
-        "door": _has(t, r"(방문\s*판매|길거리|전화\s*권유|홍보관|설명회)", neg_aware=True, neg_patterns=_NOUN_NEG) and not _has(t, r"(계약(하지|은)\s*않|가입\s*안\s*했)"),
+        "door": _has(t, r"(방문\s*판매|길거리|전화\s*권유|홍보관|설명회)", neg_aware=True, neg_patterns=_NOUN_NEG) and not _has(t, r"((계약|가입)(하지|은)\s*않|(계약|가입)\s*안\s*했|(계약|가입)한\s*적\s*없)"),
         "multilevel": _has(t, r"(다단계|판매원으로|하위\s*판매)", neg_aware=True, neg_patterns=_NOUN_NEG),
         "subscribe": _has(t, r"(구독|정기\s*결제|멤버십|자동\s*결제)", neg_aware=True, neg_patterns=_NOUN_NEG),
         "sangjo": _has(t, r"(상조|선불식)", neg_aware=True, neg_patterns=_NOUN_NEG),
@@ -230,9 +230,12 @@ _GROUND_PATTERNS = [
     ("적법한 청약철회", r"(청약\s*철회|철회)"),
 ]
 _NO_GROUND = re.compile(r"(단순\s*변심|그냥\s*(환불|취소|해지)|마음이\s*바뀌|정상\s*(제공|영업|운영)\s*중|문제.{0,4}없)")
+# 부정·불확실 어휘 통합(음절 활용형 포함) — 여러 정규식에 흩어지며 일부만 고쳐지는 사고 방지
+_NEG_CORE = r"아(니|닌|님|냐|닐)"  # 아니/아닌/아님/아냐/아닐 전 활용형
 _DESIRE = re.compile(r"(하고\s*싶|싶습니다|싶어요|하려|할래|할까|하면\s*좋|했으면|희망|원해|원합니다|바랍니다)")  # 희망형 = 사실 아님
-_UNCERTAIN = re.compile(r"(것\s*같|듯\s*하|듯한|모르겠|아닌지|인지\s*모| 카더라|들었어|들은\s*것|의심|의문|추정|아닐까)")  # 불확실 = 판정보류
-_NEG_WIDE = re.compile(r"(하지\s*않|않았|안\s*(했|됐|당했|한)|는\s*아니|이\s*아니|가\s*아니|아니고|아니에요|아닙니다|아닐|아닌|같지\s*않|없)")
+_UNCERTAIN = re.compile(r"(것\s*같|듯\s*하|듯한|모르겠|인지\s*모| 카더라|들었어|들은\s*것|의심|의문|추정|아닐까|가능성|가능한지|궁금|일지도|다고\s*(합니다|해요|함|하더|해서))")  # 불확실·전언·질문형 = 판정보류
+_NEG_WIDE = re.compile(r"(하지\s*않|않았|안\s*(했|됐|당했|한)|(는|이|가)?\s*" + _NEG_CORE + r"|같지\s*않|없)")
+_PAST_FLIP = re.compile(r"(이었|였는데|었는데|았는데|였다가|었다가|더니)")  # 과거형 = 현재는 뒤집혔을 수 있음
 
 
 def _find_ground(reason_text):
@@ -244,9 +247,11 @@ def _find_ground(reason_text):
     """
     rt = reason_text or ""
     m_ng = _NO_GROUND.search(rt)
-    if m_ng and not _NEG_WIDE.search(rt[m_ng.end():m_ng.end() + 12]):
-        # "정상 영업 중" = 사유 아님. 단 "정상 영업 중이 아니다"처럼 부정되면 뒤집지 않음
-        return False
+    if m_ng:
+        ng_tail = rt[m_ng.end():m_ng.end() + 12]
+        # "정상 영업 중" = 사유 아님. 단 부정("~이 아니다")이나 과거형("~이었는데")이면 뒤집지 않음
+        if not (_NEG_WIDE.search(ng_tail) or _PAST_FLIP.search(ng_tail)):
+            return False
     for label, rx in _GROUND_PATTERNS:
         m = re.search(rx, rt)
         if not m:

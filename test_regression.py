@@ -92,6 +92,22 @@ check("항변권: 부정된 no-ground(영업중 아님)+폐업 → possible", st
 r = server.check_installment_defense(900000, 6)
 check("공개 판정 도구: 잔여금 미입력 → 질문(기본값 금지)", "남아 있나요" in r)
 
+# 2-4) v2.3 재검증 지적: 명시적 부정 활용형·질문형·전언·과거 반전
+st, _, _ = installment_defense(900000, 6, True, "폐업 아님")
+check("항변권: '폐업 아님' → review", st == "review", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "하자는 아냐, 그냥 문의")
+check("항변권: '하자는 아냐' → review", st == "review", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "폐업 가능성이 있다고 합니다")
+check("항변권: 가능성+전언 → review", st == "review", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "청약철회가 가능한지 궁금합니다")
+check("항변권: 질문형(궁금) → review", st == "review", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "예전에는 정상 영업 중이었는데 지금은 폐업했어요")
+check("항변권: 과거 정상→현재 폐업 → possible", st == "possible", "→ %s" % st)
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "폐업 아님", amount_won=900000, installment_months=6, has_remaining_balance=True)
+check("카드사 통지: '폐업 아님' → 초안 미생성", "[초안]" not in r)
+cid, _, _ = classify("전화권유로 가입하지 않았는데 앱 구독 해지하고 싶어요")
+check("분류: 비계약 전화권유+구독 → subscribe", cid == "subscribe", "→ %s" % cid)
+
 # 3) 출력 길이(첫 응답 ≈500자, 여유 550) + 이모지 0
 import re as _re
 _EMOJI = _re.compile(r"[\U0001F000-\U0001FAFF☀-➿]")
