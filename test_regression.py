@@ -33,6 +33,8 @@ ADV = [
     ("학원 원장이 잠적해서 남은 수강료를 환불받고 싶어요.", {"academy"}),  # 학원법 분리 (오라클 단일 고정)
     ("상조는 아니고 장례식장 계약금 환불 문제예요.", {"general"}),
     ("온라인은 아니고 매장에서 직접 샀는데 환불 되나요?", {"offline_purchase"}),  # 채널 부정문
+    ("학원은 아니고 헬스장 환불 문제예요.", {"gym_quit", "gym_close"}),  # 업종 부정문
+    ("온라인으로 주문하고 매장에서 수령했는데 환불 되나요?", {"general"}),  # 혼합 채널 → 단정 금지
 ]
 for i, (txt, expected) in enumerate(ADV, 1):
     cid, label, clarify = classify(txt)
@@ -68,6 +70,16 @@ check("항변권: 2개월 경계 → 불성립", st == "not_met", "→ %s" % st)
 st, _, _ = installment_defense(900000, 3, True, "폐업")
 check("항변권: 3개월 경계 → 가능성", st == "possible", "→ %s" % st)
 
+# 2-2) v2.1 재검증 지적: 불확실·변형 부정·희망형 잔존 경로
+st, _, _ = installment_defense(900000, 6, True, "폐업인 것 같아요")
+check("항변권: 불확실(것 같다) → possible 금지", st != "possible", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "취소를 하고 싶습니다")
+check("항변권: 희망형(를 하고 싶다) → possible 금지", st != "possible", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "안 망했어요, 잘 다니고 있어요")
+check("항변권: 앞선 부정(안 망했) → possible 금지", st != "possible", "→ %s" % st)
+st, _, _ = installment_defense(900000, 6, True, "폐업했다고 들었어요")
+check("항변권: 전언(들었다) → possible 금지", st != "possible", "→ %s" % st)
+
 # 3) 출력 길이(첫 응답 ≈500자, 여유 550) + 이모지 0
 import re as _re
 _EMOJI = _re.compile(r"[\U0001F000-\U0001FAFF☀-➿]")
@@ -87,16 +99,24 @@ r = server.generate_refund_letter("판매자")
 check("내용증명: 정보 없으면 질문", "필요합니다" in r)
 r = server.generate_refund_letter("몰라요")
 check("내용증명: 수신인 불명 → 질문", "수신인" in r)
-r = server.generate_refund_letter("카드사", "OO필라테스", "6개월 이용권", "900,000원", "폐업으로 서비스 중단", amount_won=900000, installment_months=6)
+r = server.generate_refund_letter("카드사", "OO필라테스", "6개월 이용권", "900,000원", "폐업으로 서비스 중단", amount_won=900000, installment_months=6, has_remaining_balance=True)
 check("내용증명: 카드사(요건 충족) → 항변 통지·초안 표기", "할부항변권" in r and "초안" in r)
 
 # 4-1) checker 재검증 지적: 카드사 통지서 게이트 우회 차단
 r = server.generate_refund_letter("카드사", "OO필라테스", "이용권", "10만원", "폐업")
 check("카드사 통지: 금액·개월 미제공 → 질문", "할부 개월수" in r or "알려주세요" in r, )
-r = server.generate_refund_letter("카드사", "OO필라테스", "이용권", "100,000원", "폐업", amount_won=100000, installment_months=6)
+r = server.generate_refund_letter("카드사", "OO필라테스", "이용권", "100,000원", "폐업", amount_won=100000, installment_months=6, has_remaining_balance=True)
 check("카드사 통지: 10만원(요건 미달) → 생성 거부", "만들지 않았습니다" in r)
-r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "단순 변심이고 정상 영업 중", amount_won=900000, installment_months=6)
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "단순 변심이고 정상 영업 중", amount_won=900000, installment_months=6, has_remaining_balance=True)
 check("카드사 통지: 변심·정상제공 → 생성 거부", "만들지 않았습니다" in r)
+
+# 4-2) v2.1 재검증 지적: 잔여할부금 하드코딩·금액 불일치
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "폐업", amount_won=900000, installment_months=6)
+check("카드사 통지: 잔여할부금 미확인 → 질문", "잔여 할부금" in r or "남아 있나요" in r)
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "900,000원", "폐업", amount_won=900000, installment_months=6, has_remaining_balance=False)
+check("카드사 통지: 완납 → 생성 거부", "만들지 않았습니다" in r)
+r = server.generate_refund_letter("카드사", "OO헬스", "이용권", "1,000,000원", "폐업", amount_won=900000, installment_months=6, has_remaining_balance=True)
+check("카드사 통지: 표시·판정 금액 불일치 → 질문", "다릅니다" in r)
 
 print()
 if FAILS:

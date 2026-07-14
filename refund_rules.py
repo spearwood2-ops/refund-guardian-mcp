@@ -22,30 +22,39 @@ def _negated(text, m_start, patterns=(r"하지\s*않", r"않았", r"안\s*했", 
     return any(re.search(p, tail) for p in patterns)
 
 
-def _has(text, rx, neg_aware=False):
+# 명사(업종·채널) 부정: "학원은 아니고", "온라인 말고" — 동사 부정(하지 않)과 구분
+_NOUN_NEG = (r"^(은|는|이|가)?\s*(아니|말고)",)
+
+
+def _has(text, rx, neg_aware=False, neg_patterns=None):
     m = re.search(rx, text)
     if not m:
         return False
-    if neg_aware and _negated(text, m.end()):
-        return False
+    if neg_aware:
+        if neg_patterns:
+            tail = text[m.end():m.end() + 8]
+            if any(re.search(p, tail) for p in neg_patterns):
+                return False
+        elif _negated(text, m.end()):
+            return False
     return True
 
 
 def extract_signals(text):
     t = _norm(text)
     return {
-        "online": _has(t, r"(쇼핑몰|온라인|인터넷|오픈마켓|스토어|앱에서|배송|택배|주문)", neg_aware=True),
-        "offline": _has(t, r"(오프라인|매장에서|가게에서|백화점에서|직접\s*(가서|방문))", neg_aware=True),
-        "gym": _has(t, r"(헬스|피트니스|필라테스|요가|피티|PT|수영장|골프연습장|크로스핏)"),
-        "academy": _has(t, r"(학원|어학원|과외|교습소|수강료|인강|강의)"),
+        "online": _has(t, r"(쇼핑몰|온라인|인터넷|오픈마켓|스토어|앱에서|배송|택배|주문)", neg_aware=True, neg_patterns=_NOUN_NEG),
+        "offline": _has(t, r"(오프라인|매장에서|가게에서|백화점에서|직접\s*(가서|방문))", neg_aware=True, neg_patterns=_NOUN_NEG),
+        "gym": _has(t, r"(헬스|피트니스|필라테스|요가|피티|PT|수영장|골프연습장|크로스핏)", neg_aware=True, neg_patterns=_NOUN_NEG),
+        "academy": _has(t, r"(학원|어학원|과외|교습소|수강료|인강|강의)", neg_aware=True, neg_patterns=_NOUN_NEG),
         "closed": _has(t, r"(폐업|문\s*닫|먹튀|잠적|연락\s*(두절|안\s*됨|끊)|망했)", neg_aware=True),
         "quit": _has(t, r"(중도\s*해지|해지|그만\s*다니|환불받|남은\s*(기간|돈|횟수|수강))"),
         "refuse": _has(t, r"(거부|거절|안\s*(해줘|해준)|못\s*받|무시)"),
         "change_mind": _has(t, r"(단순\s*변심|사이즈|색상|맘에\s*안|잘못\s*샀|안\s*맞)"),
-        "door": _has(t, r"(방문\s*판매|길거리|전화\s*권유|홍보관|설명회)", neg_aware=False) and not _has(t, r"(계약(하지|은)\s*않|가입\s*안\s*했)"),
-        "multilevel": _has(t, r"(다단계|판매원으로|하위\s*판매)"),
-        "subscribe": _has(t, r"(구독|정기\s*결제|멤버십|자동\s*결제)"),
-        "sangjo": _has(t, r"(상조|선불식)", neg_aware=True),
+        "door": _has(t, r"(방문\s*판매|길거리|전화\s*권유|홍보관|설명회)", neg_aware=True, neg_patterns=_NOUN_NEG) and not _has(t, r"(계약(하지|은)\s*않|가입\s*안\s*했)"),
+        "multilevel": _has(t, r"(다단계|판매원으로|하위\s*판매)", neg_aware=True, neg_patterns=_NOUN_NEG),
+        "subscribe": _has(t, r"(구독|정기\s*결제|멤버십|자동\s*결제)", neg_aware=True, neg_patterns=_NOUN_NEG),
+        "sangjo": _has(t, r"(상조|선불식)", neg_aware=True, neg_patterns=_NOUN_NEG),
         "installment": _has(t, r"(할부)"),
         "purchase": _has(t, r"(샀|구매|주문|결제|산\s)"),
     }
@@ -74,6 +83,9 @@ def classify(text):
         return "door_sale", "방문·전화권유 판매", None
     if s["subscribe"]:
         return "subscribe", "구독·정기결제 해지", None
+    if s["online"] and s["offline"]:
+        # 온라인 주문 + 매장 수령 등 혼합 채널 — 주문 경로에 따라 적용 법이 다르므로 단정 금지
+        return "general", "구매 채널 확인", "주문을 온라인(앱·인터넷)으로 하셨나요, 매장에서 직접 계약하셨나요? 주문 경로에 따라 적용 법이 달라집니다."
     if s["offline"]:
         return "offline_purchase", "오프라인 매장 구매", None
     if s["online"]:
@@ -218,11 +230,18 @@ _GROUND_PATTERNS = [
     ("적법한 청약철회", r"(청약\s*철회|철회)"),
 ]
 _NO_GROUND = re.compile(r"(단순\s*변심|그냥\s*(환불|취소|해지)|마음이\s*바뀌|정상\s*(제공|영업|운영)\s*중|문제.{0,4}없)")
-_DESIRE = re.compile(r"^(하고\s*싶|하려|할래|할까|하면\s*좋|했으면)")  # 희망형 = 사실 아님
+_DESIRE = re.compile(r"(하고\s*싶|하려|할래|할까|하면\s*좋|했으면)")          # 희망형 = 사실 아님
+_UNCERTAIN = re.compile(r"(것\s*같|듯\s*하|듯한|모르겠|아닌지|인지\s*모| 카더라|들었어|들은\s*것)")  # 불확실 = 판정보류
+_NEG_WIDE = re.compile(r"(하지\s*않|않았|안\s*(했|됐|당했|한)|는\s*아니|이\s*아니|가\s*아니|아니고|아니에요|아닙니다|아닐|아닌|같지\s*않|없)")
 
 
 def _find_ground(reason_text):
-    """법정 항변 사유 탐지 — 부정문(폐업하지 않았)과 희망형(취소하고 싶어)은 사유로 안 봄."""
+    """법정 항변 사유 탐지 v3.
+
+    반환: 라벨(str) | None(사유 미확인) | False(사유 아님 확정) | "UNCERTAIN"(불확실).
+    부정문("폐업하지 않았"/"안 망했"), 희망형("취소를 하고 싶다"), 불확실("폐업인 것 같다")은
+    사실로 취급하지 않는다 — possible 판정 금지.
+    """
     rt = reason_text or ""
     if _NO_GROUND.search(rt):
         return False
@@ -230,10 +249,14 @@ def _find_ground(reason_text):
         m = re.search(rx, rt)
         if not m:
             continue
-        if _negated(rt, m.end()):
-            continue  # "폐업하지 않았어요" 류
-        if _DESIRE.match(rt[m.end():m.end() + 8]):
-            continue  # "취소하고 싶어요" = 희망이지 발생 사실 아님
+        pre = rt[max(0, m.start() - 4):m.start()]
+        post = rt[m.end():m.end() + 20]
+        if re.search(r"안\s*$", pre) or _NEG_WIDE.search(post):
+            continue  # 앞선/뒤따르는 부정 — 사실 아님
+        if _DESIRE.search(post[:12]):
+            continue  # 희망이지 발생 사실 아님
+        if _UNCERTAIN.search(post):
+            return "UNCERTAIN"  # 사실 여부 불확실 — 되물음
         return label
     return None
 
@@ -277,6 +300,11 @@ def installment_defense(amount_won, months, has_remaining, reason_text=""):
         reasons.append("사유: 단순변심·정상 제공 중이면 법정 항변 사유(미공급·하자·해지 등)에 해당하지 않습니다")
         return "not_met", reasons, [
             "항변권은 업체의 미공급·불이행 등이 있어야 합니다. 단순변심 해지는 위의 중도해지·청약철회 경로로 진행하세요 (1372 확인)",
+        ]
+    if ground == "UNCERTAIN":
+        reasons.append("항변 사유로 보이는 정황이 있으나 사실 여부가 불확실합니다(추측·전언 표현)")
+        return "review", reasons, [
+            "사실 확인이 먼저입니다: 홈택스 사업자등록상태 조회, 업체 공지·연락 기록 등으로 확인한 뒤 다시 알려주세요",
         ]
     if ground is None:
         reasons.append("법정 항변 사유(미공급·폐업으로 인한 불이행·하자·계약 해제 등) 해당 여부가 확인되지 않았습니다")
