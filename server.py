@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""환불 지킴이 v2.6 — MCP 서버 (무인증, Streamable HTTP).
+"""환불 지킴이 v2.7 — MCP 서버 (무인증, Streamable HTTP).
 
 환불 권리와 대응 절차를 확인하도록 돕는다(회수 보장 아님).
 checker P0 반영: 결론(조건부) 우선 출력·간결(≈500자)·내부 라벨 미노출·
@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from refund_rules import (  # noqa: E501
     classify,
     KNOWLEDGE,
@@ -32,10 +33,66 @@ mcp = FastMCP("refund-guardian", host=HOST, port=PORT, transport_security=_ts)
 _NOTE = "참고 정보이며 법률 자문이 아닙니다. 1372 소비자상담센터(상담료 없음, 통화료 발신자 부담, 평일 9-18시·점심 12-13시 제외)에서 확인하세요."
 _OUTPUT_EMOJI = re.compile(r"[\U0001F000-\U0001FAFF☀-➿]")
 
+# PlayMCP 공개 description은 1,024자 이내로 유지한다. 긴 함수 docstring은
+# 개발자용 상세 규칙으로 보존하고, 아래 문구만 tools/list에 노출한다.
+_CHECK_REFUND_RIGHT_DESCRIPTION = (
+    "환불 지킴이 (Refund Guardian)가 소비자 상황의 환불 가능성, 적용 법령·기한, "
+    "확인할 사실과 다음 행동을 조건부로 안내합니다. 온라인·오프라인 구매, 방문판매, "
+    "구독, 헬스장·필라테스·학원, 상조, 폐업·잠적 등 환불 상황을 한국어로 입력하세요. "
+    "핵심 사실이 부족하면 권리를 추정하거나 결과를 보장하지 않고 한 가지 확인 질문을 "
+    "반환합니다. 일반 정보이며 법률 자문이 아닙니다."
+)
+_CHECK_INSTALLMENT_DESCRIPTION = (
+    "환불 지킴이 (Refund Guardian)가 할부항변권의 수량 요건(총액·기간·잔여금)과 "
+    "법정 사유 후보를 점검합니다. has_remaining_balance는 사용자에게 "
+    "확인하고 추정하지 마세요. ground_code는 입력 스키마의 6개 값 중 하나입니다. "
+    "ground_confirmed=True는 같은 할부계약에서 이미 발생한 완전한 사유와 "
+    "필수 ground_facts가 모두 확인될 때만 사용하세요. 필수 사실은 "
+    "contract_invalid=installment_contract_scope+contract_invalid_confirmed, "
+    "contract_ended=installment_contract_scope+contract_ended_confirmed, "
+    "supply_not_completed=installment_contract_scope+supply_time_reached+actual_non_supply, "
+    "warranty_unfulfilled=installment_contract_scope+warranty_duty_exists+"
+    "warranty_duty_unfulfilled, purpose_failed_by_breach=installment_contract_scope+"
+    "seller_breach_confirmed+contract_purpose_unattainable, lawful_withdrawal="
+    "installment_contract_scope+withdrawal_legally_available+withdrawal_exercised입니다. "
+    "폐업·하자·채무불이행·청약철회 언급만으로 확정하지 말고 부정·질문·전언·가능성·"
+    "희망·미래·요청 표현도 확정하지 마세요. 결과는 자동 권리 확정이 아닌 미충족 또는 "
+    "공식 검토 필요입니다. 일반 정보이며 법률 자문이 아닙니다."
+)
+_GENERATE_LETTER_DESCRIPTION = (
+    "환불 지킴이 (Refund Guardian)가 판매자용 환불 요구서 초안을 만들거나 카드 분쟁의 "
+    "공식 확인 경로를 안내합니다. recipient는 판매자 또는 카드사이며 업체명·계약 내용·"
+    "금액·상황이 필요합니다. 판매자 분기만 사용자가 검토할 [초안]을 생성합니다. 카드사 "
+    "분기는 결제 총액·할부기간·잔여할부금과 구조화된 법정 사유를 먼저 점검하되 지급거절 "
+    "행사문을 자동 생성하지 않고 카드사 공식 양식·증빙 검토로 연결합니다. 카드사 입력의 "
+    "ground_code, ground_confirmed, ground_facts에는 check_installment_defense와 같은 "
+    "엄격한 사유 규칙을 적용하세요. 같은 할부계약에서 법정 사유 전체가 이미 발생했고 "
+    "정확한 ground_facts가 모두 있을 때만 confirmed를 사용하세요. 폐업·하자·"
+    "채무불이행·청약철회 언급만으로 사유를 "
+    "확정하지 말고 부정·질문·전언·가능성·희망·미래·요청 표현에서도 추정하지 마세요. "
+    "일반 정보이며 법률 자문이나 환불 결과 보장이 아닙니다."
+)
+_REFUND_CHANNELS_DESCRIPTION = (
+    "환불 지킴이 (Refund Guardian)가 사건 유형에 맞는 1372, 한국소비자원, 카드사·"
+    "금융감독원, 홈택스, 소액사건심판 등 공식 소비자 구제 채널을 우선순위대로 안내합니다. "
+    "외부 기관에 자동 접수·전송하지 않으며 법률 자문이나 해결 보장이 아닙니다."
+)
+
 
 def _document_text(value) -> str:
     """사용자 사실은 보존하되 공식 문서 출력 표준에 맞게 이모지·중복 공백만 제거."""
     return " ".join(_OUTPUT_EMOJI.sub("", str(value)).split())
+
+
+def _read_only_annotations(title: str) -> ToolAnnotations:
+    """이 서버의 조회·텍스트 생성 도구에 공통으로 쓰는 MCP 안전 힌트."""
+    return ToolAnnotations(
+        title=title,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
 
 
 def _render(k, clarify=None, max_checks=3, max_steps=3):
@@ -50,9 +107,12 @@ def _render(k, clarify=None, max_checks=3, max_steps=3):
     return "\n".join(out)
 
 
-@mcp.tool()
+@mcp.tool(
+    description=_CHECK_REFUND_RIGHT_DESCRIPTION,
+    annotations=_read_only_annotations("환불 지킴이 - 환불 권리 확인"),
+)
 def check_refund_right(situation: str) -> str:
-    """Identify likely legal refund rights for a Korean consumer dispute (conditional, never absolute).
+    """환불 지킴이가 소비자 상황에서 적용 가능한 환불 권리와 다음 단계를 조건부로 안내합니다.
 
     Describe the situation in Korean (헬스장 폐업/중도해지, 학원, 온라인 환불 거부,
     오프라인 구매, 방문판매, 구독, 상조, 업체 잠적 등). Returns: the applicable law
@@ -63,7 +123,10 @@ def check_refund_right(situation: str) -> str:
     return _render(KNOWLEDGE[cid], clarify)
 
 
-@mcp.tool()
+@mcp.tool(
+    description=_CHECK_INSTALLMENT_DESCRIPTION,
+    annotations=_read_only_annotations("환불 지킴이 - 할부항변권 확인"),
+)
 def check_installment_defense(
     amount_won: int,
     installment_months: int,
@@ -73,7 +136,7 @@ def check_installment_defense(
     ground_confirmed: Optional[bool] = None,
     ground_facts: Optional[List[InstallmentGroundFact]] = None,
 ) -> str:
-    """Assess 할부항변권 (할부거래법 제16조) — requires quantity conditions AND a statutory ground.
+    """환불 지킴이가 할부항변권의 수량 요건과 법정 사유 후보를 점검합니다.
 
     amount_won: total price. installment_months: card installment period.
     has_remaining_balance: whether unpaid installments remain — REQUIRED (ask the user;
@@ -121,7 +184,10 @@ def check_installment_defense(
     return "\n".join(out)
 
 
-@mcp.tool()
+@mcp.tool(
+    description=_GENERATE_LETTER_DESCRIPTION,
+    annotations=_read_only_annotations("환불 지킴이 - 환불 요구서 작성"),
+)
 def generate_refund_letter(
     recipient: str,
     business_name: str = "",
@@ -135,7 +201,7 @@ def generate_refund_letter(
     ground_confirmed: Optional[bool] = None,
     ground_facts: Optional[List[InstallmentGroundFact]] = None,
 ) -> str:
-    """Draft a seller demand letter or guide a card-installment dispute safely.
+    """환불 지킴이가 판매자 환불 요구서 초안을 만들거나 카드 분쟁의 공식 확인 경로를 안내합니다.
 
     recipient must be "판매자" or "카드사". All facts (business_name, item,
     amount, situation) are required. For "카드사",
@@ -226,9 +292,12 @@ def generate_refund_letter(
     return "\n".join(body)
 
 
-@mcp.tool()
+@mcp.tool(
+    description=_REFUND_CHANNELS_DESCRIPTION,
+    annotations=_read_only_annotations("환불 지킴이 - 구제 채널 안내"),
+)
 def refund_channels(case_type: str = "일반") -> str:
-    """Official Korean consumer-remedy channels, filtered by case (폐업/카드/상조/일반)."""
+    """환불 지킴이가 사건 유형에 맞는 공식 소비자 구제 채널을 안내합니다."""
     base = ["1. 1372 소비자상담센터 — 국번없이 1372. 내 사건의 정확한 절차 확인(상담료 없음·통화료 발신자 부담)",
             "2. 한국소비자원 피해구제 — kca.go.kr 온라인 신청(무료)"]
     t = case_type

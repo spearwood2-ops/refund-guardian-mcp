@@ -3,9 +3,12 @@
 
 실행: python test_regression.py  (전부 PASS 여야 심사요청 게이트 통과)
 """
+import asyncio
 import io
 import inspect
 import sys
+from importlib.metadata import version
+from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.path.insert(0, ".")
@@ -43,6 +46,11 @@ def card_result(situation, ground_code=None, ground_confirmed=None, ground_facts
         ground_confirmed=ground_confirmed,
         ground_facts=ground_facts,
     )
+
+
+requirements = Path(__file__).with_name("requirements.txt").read_text(encoding="utf-8").splitlines()
+check("배포 의존성: 검증한 MCP SDK 1.28.0 고정", "mcp==1.28.0" in requirements)
+check("배포 의존성: 실행 MCP SDK도 1.28.0", version("mcp") == "1.28.0")
 
 
 # 1) checker 적대 10문장 (기대 = 확인해야 할 우선 유형; 정답 집합 허용)
@@ -205,6 +213,42 @@ for tool_name in ("check_installment_defense", "generate_refund_letter"):
           fact_enum == EXPECTED_GROUND_FACTS)
     check("MCP 스키마: %s ground_facts 기본 null" % tool_name,
           props["ground_facts"].get("default", "missing") is None)
+
+# 2-6-1) PlayMCP 접수 메타데이터: 실제 tools/list 응답의 description·annotations 검증
+EXPECTED_TOOL_TITLES = {
+    "check_refund_right": "환불 지킴이 - 환불 권리 확인",
+    "check_installment_defense": "환불 지킴이 - 할부항변권 확인",
+    "generate_refund_letter": "환불 지킴이 - 환불 요구서 작성",
+    "refund_channels": "환불 지킴이 - 구제 채널 안내",
+}
+wire_tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+check("MCP 메타데이터: 공개 툴 4개 이름 고정", set(wire_tools) == set(EXPECTED_TOOL_TITLES))
+for tool_name, expected_title in EXPECTED_TOOL_TITLES.items():
+    tool = wire_tools[tool_name]
+    annotations = tool.annotations
+    description = tool.description or ""
+    check("MCP description: %s 국·영문 서비스명 포함" % tool_name,
+          "환불 지킴이 (Refund Guardian)" in description)
+    check("MCP description: %s 1,024자 이하" % tool_name,
+          0 < len(description) <= 1024)
+    check("MCP annotations: %s 정의" % tool_name, annotations is not None)
+    check("MCP annotations: %s title 고정" % tool_name,
+          annotations.title == expected_title)
+    check("MCP annotations: %s 안전 힌트" % tool_name,
+          annotations.readOnlyHint is True
+          and annotations.destructiveHint is False
+          and annotations.idempotentHint is True
+          and annotations.openWorldHint is False)
+
+check("MCP description: 할부항변권 자동 확정 금지 유지",
+      "자동 권리 확정" in wire_tools["check_installment_defense"].description)
+check("MCP description: 카드사 지급거절 행사문 자동 생성 금지 유지",
+      "지급거절 행사문을 자동 생성하지 않고" in wire_tools["generate_refund_letter"].description)
+check("MCP description: 할부 동일 계약 범위 유지",
+      "같은 할부계약" in wire_tools["check_installment_defense"].description
+      and "같은 할부계약" in wire_tools["generate_refund_letter"].description)
+check("MCP description: 구제 채널 자동 접수·전송 아님",
+      "자동 접수·전송하지 않으며" in wire_tools["refund_channels"].description)
 
 OMISSION_CASES = [
     ("자유문장만", {}, "review"),
